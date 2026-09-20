@@ -53,13 +53,17 @@ post_install do |installer|
     end
     
     target.build_configurations.each do |config|
+      # Swift 6 컴파일 호환성 플래그 추가
+      config.build_settings['SWIFT_VERSION'] = '5.0'
+      config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -enable-experimental-feature AccessLevelOnImport -enable-experimental-feature SendingArgsAndResults'
+
       # You can enable the permissions needed here. For example to enable camera
       # permission, just remove the `#` character in front so it looks like this:
       #
       # ## dart: PermissionGroup.camera
       # 'PERMISSION_CAMERA=1'
       #
-      #  Preprocessor definitions can be found in: https://github.com/Baseflow/flutter-permission-handler/blob/master/permission_handler/ios/Classes/PermissionHandlerEnums.h
+      # Preprocessor definitions can be found in: https://github.com/Baseflow/flutter-permission-handler/blob/master/permission_handler/ios/Classes/PermissionHandlerEnums.h
       config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
         '$(inherited)',
 
