@@ -14,8 +14,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode version
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+      - name: Select Xcode 15
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          xcodebuild -version
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,6 +33,12 @@ jobs:
       - name: Install dependencies
         working-directory: violet
         run: flutter pub get
+
+      - name: Update CocoaPods Dependencies
+        working-directory: violet/ios
+        run: |
+          pod repo update
+          pod update FirebaseCoreInternal FirebaseCore FirebaseCrashlytics --no-repo-update || true
 
       - name: Build iOS (No codesign)
         working-directory: violet
