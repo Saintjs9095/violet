@@ -1,0 +1,41 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ dev, master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        working-directory: violet
+        run: flutter pub get
+
+      - name: Build iOS (No codesign)
+        working-directory: violet
+        run: flutter build ios --release --no-codesign
+
+      - name: Package Payload into IPA
+        run: |
+          mkdir Payload
+          cp -r violet/build/ios/iphoneos/Runner.app Payload/
+          zip -r Violet.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Violet-Custom-IPA
+          path: Violet.ipa
