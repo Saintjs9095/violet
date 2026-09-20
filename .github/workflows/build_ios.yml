@@ -34,16 +34,23 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Configure Dummy Team and Bypass Codesign
+      - name: Inject Dummy Team and Bypass Codesign
         working-directory: violet/ios
         run: |
-          # Flutter의 Team ID 검사를 통과시키기 위한 더미 10자리 Team ID 주입
-          sed -i '' -E 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = 1234567890;/g' Runner.xcodeproj/project.pbxproj
-          sed -i '' -E 's/DevelopmentTeam = [^;]*;/DevelopmentTeam = 1234567890;/g' Runner.xcodeproj/project.pbxproj
+          # 1. pbxproj의 모든 빌드 설정 블록 내부에 DEVELOPMENT_TEAM 강제 삽입
+          sed -i '' 's/buildSettings = {/buildSettings = {\
+  				DEVELOPMENT_TEAM = 1234567890;\
+  				CODE_SIGN_STYLE = Manual;\
+  				CODE_SIGNING_ALLOWED = NO;\
+  				CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
 
-          # project.pbxproj에 서명 비활성화 플래그 삽입
-          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' Runner.xcodeproj/project.pbxproj
+          # 2. xcconfig 파일들에도 팀 ID 및 무서명 설정 주입
+          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
+          
+          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Generated.xcconfig
 
       - name: Build iOS Release (No codesign)
         working-directory: violet
