@@ -36,22 +36,20 @@ jobs:
       - name: Patch FirebaseCoreInternal Swift Syntax
         working-directory: violet/ios
         run: |
-          # 1. sending / consuming 키워드 제거
           TARGET_LOCK="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/Utilities/UnfairLock.swift"
-          if [ -f "$TARGET_LOCK" ]; then
-            sed -i '' 's/sending //g' "$TARGET_LOCK"
-            sed -i '' 's/consuming //g' "$TARGET_LOCK"
-            sed -i '' 's/borrowing //g' "$TARGET_LOCK"
-            sed -i '' 's/public import/import/g' "$TARGET_LOCK"
-            sed -i '' 's/internal import/import/g' "$TARGET_LOCK"
-          fi
-
-          # 2. AccessLevelOnImport 에러 유발 구문 제거
           TARGET_PAYLOAD="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/HeartbeatLogging/HeartbeatsPayload.swift"
-          if [ -f "$TARGET_PAYLOAD" ]; then
-            sed -i '' 's/public import/import/g' "$TARGET_PAYLOAD"
-            sed -i '' 's/internal import/import/g' "$TARGET_PAYLOAD"
-          fi
+
+          for FILE in "$TARGET_LOCK" "$TARGET_PAYLOAD"; do
+            if [ -f "$FILE" ]; then
+              echo "Patching $FILE..."
+              # sending, consuming, borrowing 키워드 제거
+              sed -i '' 's/sending //g' "$FILE"
+              sed -i '' 's/consuming //g' "$FILE"
+              sed -i '' 's/borrowing //g' "$FILE"
+              # 모든 접근 제어자가 붙은 import를 순수 import로 변환
+              sed -i '' -E 's/^[[:space:]]*(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' "$FILE"
+            fi
+          done
 
       - name: Build iOS (No codesign)
         working-directory: violet
