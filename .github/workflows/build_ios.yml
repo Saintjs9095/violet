@@ -34,9 +34,13 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Build iOS Assets and Dependencies
+      - name: Prepare Flutter iOS Assets
         working-directory: violet
-        run: flutter build ios --config-only
+        run: flutter build ios --config-only --no-codesign
+
+      - name: Install Pods
+        working-directory: violet/ios
+        run: pod install
 
       - name: Build Xcode Workspace (No codesign)
         working-directory: violet/ios
@@ -53,8 +57,10 @@ jobs:
 
       - name: Package Payload into IPA
         run: |
-          mkdir Payload
-          cp -r violet/build/ios/iphoneos/Runner.app Payload/ || cp -r $(find violet/ios/build -name "Runner.app" -type d | head -n 1) Payload/
+          mkdir -p Payload
+          APP_PATH=$(find violet -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+          echo "Found app at: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
           zip -r Violet.ipa Payload
 
       - name: Upload IPA Artifact
