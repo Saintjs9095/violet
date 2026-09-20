@@ -34,47 +34,46 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Flutter Assets
-        working-directory: violet
-        run: flutter build ios --config-only --no-codesign
-
-      - name: Install Pods
-        working-directory: violet/ios
-        run: pod install
-
-      - name: Disable Signing for All Targets
+      - name: Disable Code Signing across Project
         working-directory: violet/ios
         run: |
+          # 1. xcconfig 설정에 강제 무서명 플래그 삽입
+          for config in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "CODE_SIGNING_ALLOWED=NO" >> "$config"
+            echo "CODE_SIGNING_REQUIRED=NO" >> "$config"
+            echo "CODE_SIGN_IDENTITY=" >> "$config"
+            echo "EXPANDED_CODE_SIGN_IDENTITY=" >> "$config"
+          done
+
+          # 2. project.pbxproj 내 모든 타깃의 서명 요구 제거
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
-              s = f.read()
-          s = s.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          s = s.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
+              content = f.read()
+
+          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
+          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
+          content = content.replace("\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"iPhone Developer\";", "\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"\";")
+
           with open(path, "w") as f:
-              f.write(s)
+              f.write(content)
           '
 
-      - name: Build Runner with xcodebuild
-        working-directory: violet/ios
+      - name: Build iOS Release App
+        working-directory: violet
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          flutter build ios --release --no-codesign
 
       - name: Package Payload into IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find violet/ios/build -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
-          echo "Packaging found app from: $APP_PATH"
+          APP_PATH=$(find violet/build/ios -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find violet -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
+          fi
+          echo "Packaging found app: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           zip -r Violet.ipa Payload
 
