@@ -14,6 +14,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
