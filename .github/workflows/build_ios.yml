@@ -34,6 +34,19 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
+      - name: Disable Code Signing in Xcode Project
+        working-directory: violet/ios
+        run: |
+          # 서명 방식을 수동(Manual)으로 변경하고 팀 요구사항 비활성화
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' Runner.xcodeproj/project.pbxproj
+          
+          # Release 빌드 설정에 무서명 플래그 강제 주입
+          echo "CODE_SIGNING_ALLOWED=NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_REQUIRED=NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
+          echo "EXPANDED_CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
+
       - name: Build iOS (No codesign)
         working-directory: violet
         env:
