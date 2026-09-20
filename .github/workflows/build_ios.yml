@@ -34,54 +34,31 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Inject Dummy Team and Bypass Codesign across all targets
+      - name: Build Flutter iOS Framework and Assets
+        working-directory: violet
+        run: |
+          flutter build ios-framework --release --no-debug --no-profile || flutter build ios --config-only --no-codesign
+
+      - name: Install Pods
+        working-directory: violet/ios
+        run: pod install
+
+      - name: Build and Package with xcodebuild
         working-directory: violet/ios
         run: |
-          python3 -c '
-          path = "Runner.xcodeproj/project.pbxproj"
-          with open(path, "r") as f:
-              content = f.read()
+          xcodebuild archive \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -archivePath build/Runner.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
-          # 모든 타깃(Runner, ShareExtension 등)의 서명 스타일을 Manual로 통일
-          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-
-          # 모든 빌드 설정 블록에 Dummy Team 및 무서명 플래그 삽입
-          injection = """buildSettings = {
-          \t\t\t\tDEVELOPMENT_TEAM = 1234567890;
-          \t\t\t\tCODE_SIGN_STYLE = Manual;
-          \t\t\t\tCODE_SIGNING_ALLOWED = NO;
-          \t\t\t\tCODE_SIGNING_REQUIRED = NO;
-          \t\t\t\tCODE_SIGN_IDENTITY = "";"""
-          content = content.replace("buildSettings = {", injection)
-
-          with open(path, "w") as f:
-              f.write(content)
-          '
-          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Release.xcconfig
-          echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
-          echo "EXPANDED_CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
-
-          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Generated.xcconfig
-          echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Generated.xcconfig
-          echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Generated.xcconfig
-          echo "CODE_SIGN_IDENTITY = " >> Flutter/Generated.xcconfig
-          echo "EXPANDED_CODE_SIGN_IDENTITY = " >> Flutter/Generated.xcconfig
-
-      - name: Build iOS Release (No codesign)
-        working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
-        run: |
-          flutter build ios --release --no-codesign -v
-
-      - name: Package Payload into IPA
-        run: |
-          mkdir -p Payload
-          APP_PATH=$(find violet/build/ios -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
-          echo "Packaging found app: $APP_PATH"
-          cp -r "$APP_PATH" Payload/
+          mkdir -p ../../Payload
+          cp -r build/Runner.xcarchive/Products/Applications/Runner.app ../../Payload/
+          cd ../..
           zip -r Violet.ipa Payload
 
       - name: Upload IPA Artifact
