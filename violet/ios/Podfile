@@ -36,11 +36,11 @@ target 'Runner' do
 end
 
 post_install do |installer|
-  # 1. Swift 6 문법 충돌 파일 자동 패치
+  # 1. Swift 6 문법 및 모든 위치의 import 접근 제어자 일괄 표준화
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/sending //g' {} +")
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/consuming //g' {} +")
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/borrowing //g' {} +")
-  system("find Pods -name '*.swift' -type f -exec sed -i '' -E 's/^[[:space:]]*(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' {} +")
+  system("find Pods -name '*.swift' -type f -exec sed -i '' -E 's/(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' {} +")
 
   rust_env = <<~SH
     export PATH="$HOME/.cargo/bin:$PATH"
