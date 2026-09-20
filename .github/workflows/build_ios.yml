@@ -37,49 +37,56 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Patch project and podfile configurations
+      - name: Prepare Flutter Assets & Frameworks
+        working-directory: violet
+        run: |
+          # Flutter Dart 엔진 및 에셋 빌드
+          flutter build bundle --release
+
+      - name: Install Pods
+        working-directory: violet/ios
+        run: pod install
+
+      - name: Build Runner App with xcodebuild
         working-directory: violet/ios
         run: |
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = " >> "$cfg"
-          done
-
-          python3 -c '
-          path = "Runner.xcodeproj/project.pbxproj"
-          with open(path, "r") as f:
-              content = f.read()
-          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
-          with open(path, "w") as f:
-              f.write(content)
-          '
-
-      - name: Build Flutter iOS App
-        working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
-        run: |
-          flutter build ios --release --no-codesign || true
+          # 메인 타깃(Runner)만 단독 빌드하여 ShareExtension 충돌 완전 회피
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath derived_data \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into IPA
         run: |
-          APP_PATH=$(find violet/build/ios -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+          # 1. 실제 빌드된 Runner.app 경로 찾기
+          APP_PATH=$(find violet/ios/derived_data -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
+          
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find violet -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+            echo "::error::Runner.app was not found! Build failed."
+            exit 1
           fi
 
-          echo "Found app at: $APP_PATH"
+          echo "Found compiled app at: $APP_PATH"
+          ls -la "$APP_PATH"
+
+          # 2. 표준 Payload 구조로 압축
           rm -rf ipa_build Violet.ipa
           mkdir -p ipa_build/Payload
           cp -R "$APP_PATH" ipa_build/Payload/
-          rm -rf ipa_build/Payload/Runner.app/PlugIns/ShareExtension.appex || true
 
           cd ipa_build
           zip -qr ../Violet.ipa Payload
           cd ..
+
+          # 3. 용량 출력 검증
+          ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
