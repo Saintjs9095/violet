@@ -14,11 +14,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode 15.4
-        run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          xcodebuild -version
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,10 +29,15 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
+      - name: Resolve CocoaPods for Swift 5
+        working-directory: violet/ios
+        run: |
+          rm -f Podfile.lock
+          pod repo update
+          pod install
+
       - name: Build iOS (No codesign)
         working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: flutter build ios --release --no-codesign
 
       - name: Package Payload into IPA
