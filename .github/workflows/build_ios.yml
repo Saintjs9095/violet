@@ -34,33 +34,42 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Pre-build Flutter Bundle
+      - name: Pre-build Flutter Frameworks and Assets
         working-directory: violet
         run: |
           flutter build bundle --release
 
-      - name: Configure Dummy Team and Code Signing
+      - name: Configure CocoaPods
+        working-directory: violet/ios
+        run: pod install
+
+      - name: Completely Strip Codesign from Xcode Project
         working-directory: violet/ios
         run: |
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
-              s = f.read()
-          s = s.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          s = s.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
-          s = s.replace("\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"iPhone Developer\";", "\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"\";")
-          with open(path, "w") as f:
-              f.write(s)
-          '
-          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Release.xcconfig
-          echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
-          echo "EXPANDED_CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
+              lines = f.readlines()
 
-      - name: Install Pods
-        working-directory: violet/ios
-        run: pod install
+          new_lines = []
+          for line in lines:
+              # 기존 서명 관련 라인 제거 및 Manual 전환
+              if "CODE_SIGN_IDENTITY" in line or "DEVELOPMENT_TEAM" in line or "PROVISIONING_PROFILE" in line:
+                  continue
+              if "CODE_SIGN_STYLE" in line:
+                  new_lines.append("\t\t\t\tCODE_SIGN_STYLE = Manual;\n")
+                  continue
+              new_lines.append(line)
+              # 모든 buildSettings 블록 시작 시 무서명 강제 삽입
+              if "buildSettings = {" in line:
+                  new_lines.append("\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGN_IDENTITY = \"\";\n")
+                  new_lines.append("\t\t\t\tDEVELOPMENT_TEAM = \"\";\n")
+
+          with open(path, "w") as f:
+              f.writelines(new_lines)
+          '
 
       - name: Build Runner App
         working-directory: violet/ios
@@ -71,7 +80,6 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
-            DEVELOPMENT_TEAM=1234567890 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
