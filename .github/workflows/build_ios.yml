@@ -37,15 +37,9 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Flutter Configuration and Frameworks
-        working-directory: violet
-        run: |
-          flutter build ios --config-only --no-codesign
-
       - name: Remove ShareExtension Target completely
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 블록 완전 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -63,15 +57,13 @@ jobs:
           with open("Podfile", "w") as f:
               f.writelines(new_lines)
           '
-
-          # 2. project.pbxproj에서 ShareExtension 타깃 연결 참조 제거 및 무서명 강제
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
               lines = f.readlines()
           new_lines = []
           for line in lines:
-              if "ShareExtension.appex" in line or "ShareExtension" in line and "PBXTargetDependency" in line:
+              if "ShareExtension.appex" in line or ("ShareExtension" in line and "PBXTargetDependency" in line):
                   continue
               if "CODE_SIGN_STYLE" in line:
                   new_lines.append("\t\t\t\tCODE_SIGN_STYLE = Manual;\n")
@@ -91,6 +83,12 @@ jobs:
       - name: Install Pods
         working-directory: violet/ios
         run: pod install
+
+      - name: Compile Flutter Assets and App Framework
+        working-directory: violet
+        run: |
+          # Flutter assemble을 통해 xcodebuild에 필요한 App.framework 및 Flutter 자산 사전 컴파일
+          flutter assemble -dTargetPlatform=ios -dBuildMode=release release_ios_bundle_flutter_assets
 
       - name: Build Runner Target with xcodebuild
         working-directory: violet/ios
@@ -123,14 +121,13 @@ jobs:
           mkdir -p ipa_build/Payload
           cp -R "$APP_PATH" ipa_build/Payload/
 
-          # 불필요한 플러그인 확장 폴더 제거
           rm -rf ipa_build/Payload/Runner.app/PlugIns || true
 
           cd ipa_build
           zip -qr ../Violet.ipa Payload
           cd ..
 
-          echo "Final IPA Size:"
+          echo "Generated IPA Size:"
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
