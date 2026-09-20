@@ -34,30 +34,38 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Disable Code Signing across Project
+      - name: Inject Dummy Team and Disable Codesigning
         working-directory: violet/ios
         run: |
-          # 1. xcconfig 설정에 강제 무서명 플래그 삽입
-          for config in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED=NO" >> "$config"
-            echo "CODE_SIGNING_REQUIRED=NO" >> "$config"
-            echo "CODE_SIGN_IDENTITY=" >> "$config"
-            echo "EXPANDED_CODE_SIGN_IDENTITY=" >> "$config"
-          done
-
-          # 2. project.pbxproj 내 모든 타깃의 서명 요구 제거
+          # 1. pbxproj 내 모든 Target의 buildSettings 블록에 더미 Team ID와 무서명 플래그 강제 주입
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
-              content = f.read()
+              lines = f.readlines()
 
-          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
-          content = content.replace("\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"iPhone Developer\";", "\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"\";")
+          new_lines = []
+          for line in lines:
+              new_lines.append(line)
+              if "buildSettings = {" in line:
+                  new_lines.append("\t\t\t\tDEVELOPMENT_TEAM = 1234567890;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGN_STYLE = Manual;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n")
+                  new_lines.append("\t\t\t\tCODE_SIGN_IDENTITY = \"\";\n")
 
           with open(path, "w") as f:
-              f.write(content)
+              f.writelines(new_lines)
           '
+
+          # 2. Flutter 설정 파일들에도 주입
+          for f in Flutter/Release.xcconfig Flutter/Generated.xcconfig Flutter/AppFrameworkInfo.plist; do
+            if [ -f "$f" ] && [[ "$f" == *.xcconfig ]]; then
+              echo "DEVELOPMENT_TEAM = 1234567890" >> "$f"
+              echo "CODE_SIGNING_ALLOWED = NO" >> "$f"
+              echo "CODE_SIGNING_REQUIRED = NO" >> "$f"
+              echo "CODE_SIGN_IDENTITY = " >> "$f"
+            fi
+          done
 
       - name: Build iOS Release App
         working-directory: violet
