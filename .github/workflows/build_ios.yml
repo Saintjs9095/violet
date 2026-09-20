@@ -34,31 +34,48 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Build Flutter iOS Framework and Assets
+      - name: Prepare Flutter Assets
         working-directory: violet
-        run: |
-          flutter build ios-framework --release --no-debug --no-profile || flutter build ios --config-only --no-codesign
+        run: flutter build ios --config-only --no-codesign
 
       - name: Install Pods
         working-directory: violet/ios
         run: pod install
 
-      - name: Build and Package with xcodebuild
+      - name: Disable Signing for All Targets
         working-directory: violet/ios
         run: |
-          xcodebuild archive \
+          python3 -c '
+          path = "Runner.xcodeproj/project.pbxproj"
+          with open(path, "r") as f:
+              s = f.read()
+          s = s.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
+          s = s.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
+          with open(path, "w") as f:
+              f.write(s)
+          '
+
+      - name: Build Runner with xcodebuild
+        working-directory: violet/ios
+        run: |
+          xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
-            -archivePath build/Runner.xcarchive \
+            -sdk iphoneos \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
             COMPILER_INDEX_STORE_ENABLE=NO
 
-          mkdir -p ../../Payload
-          cp -r build/Runner.xcarchive/Products/Applications/Runner.app ../../Payload/
-          cd ../..
+      - name: Package Payload into IPA
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find violet/ios/build -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
+          echo "Packaging found app from: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
           zip -r Violet.ipa Payload
 
       - name: Upload IPA Artifact
