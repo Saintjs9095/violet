@@ -40,7 +40,6 @@ jobs:
       - name: Patch project configurations
         working-directory: violet/ios
         run: |
-          # pbxproj 내 서명 수동화 및 식별자 제거
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
@@ -50,7 +49,6 @@ jobs:
           with open(path, "w") as f:
               f.write(content)
           '
-          # Pods 및 Release 설정에 무서명 주입
           echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
           echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
           echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
@@ -60,42 +58,51 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter CLI는 실제 앱 번들을 컴파일 완료한 뒤 마지막 서명 검사에서 exit code 1을 발생시킵니다.
-          # 따라서 성공/실패 여부와 관계없이 다음 스텝으로 진행합니다.
+          # Flutter CLI는 실제 앱 번들을 온전히 빌드한 뒤 마지막 서명 단계에서 멈추므로 넘어가도록 처리
           flutter build ios --release --no-codesign || true
 
       - name: Package Real IPA
-        working-directory: violet
         run: |
-          # 1. 빌드 완료된 실제 Runner.app 디렉터리 정밀 탐색 (Info.plist가 존재하는 진짜 앱 번들)
-          APP_PATH=$(find build/ios/iphoneos -name "Runner.app" -type d | head -n 1)
-          
+          # 1. 빌드된 Runner.app 실제 위치 확인
+          echo "=== Searching for Runner.app ==="
+          APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep -v "DerivedData" | head -n 1)
+
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find ios/build -name "Runner.app" -type d | head -n 1)
+            echo "Runner.app not found in standard paths. Searching everywhere..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find . -name "Runner.app" -type d | head -n 1)
+            echo "::error::Runner.app could not be found anywhere!"
+            exit 1
           fi
 
-          echo "Detected App Bundle: $APP_PATH"
-
-          # 2. 번들 내용물 검사 및 로깅
+          echo "Target App Bundle: $APP_PATH"
+          echo "=== App Bundle Contents ==="
           ls -la "$APP_PATH"
 
-          # 3. 사이드로딩 표준 패키징
-          rm -rf ../ipa_build ../Violet.ipa
-          mkdir -p ../ipa_build/Payload
-          cp -R "$APP_PATH" ../ipa_build/Payload/
+          # 2. 최상위 루트 디렉터리에 표준 Payload 구성
+          rm -rf Payload Violet.ipa
+          mkdir -p Payload
 
-          # SideStore/AltStore 충돌 방지: 불필요한 확장 정리
-          rm -rf ../ipa_build/Payload/Runner.app/PlugIns || true
+          # Runner.app 통째로 복사
+          cp -R "$APP_PATH" Payload/
 
-          cd ../ipa_build
-          zip -qr ../Violet.ipa Payload
-          cd ..
+          # SideStore 충돌 방지: 불필요한 확장 폴더 제거
+          rm -rf Payload/Runner.app/PlugIns || true
 
-          echo "Final IPA File Details:"
+          # 3. zip 압축 (루트 경로에서 단일 실행)
+          zip -r -q Violet.ipa Payload
+
+          # 4. 파일 크기 검증 (바이트 수가 너무 작으면 실패 처리)
+          IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
+          echo "Final IPA Size in bytes: $IPA_SIZE"
+
+          if [ "$IPA_SIZE" -lt 1000000 ]; then
+            echo "::error::Violet.ipa size is too small ($IPA_SIZE bytes). Build did not produce a full binary!"
+            exit 1
+          fi
+
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
