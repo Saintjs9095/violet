@@ -34,54 +34,54 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Inject Dummy Team and Disable Codesigning
+      - name: Pre-build Flutter Bundle
+        working-directory: violet
+        run: |
+          flutter build bundle --release
+
+      - name: Configure Dummy Team and Code Signing
         working-directory: violet/ios
         run: |
-          # 1. pbxproj 내 모든 Target의 buildSettings 블록에 더미 Team ID와 무서명 플래그 강제 주입
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
-              lines = f.readlines()
-
-          new_lines = []
-          for line in lines:
-              new_lines.append(line)
-              if "buildSettings = {" in line:
-                  new_lines.append("\t\t\t\tDEVELOPMENT_TEAM = 1234567890;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGN_STYLE = Manual;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGN_IDENTITY = \"\";\n")
-
+              s = f.read()
+          s = s.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
+          s = s.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
+          s = s.replace("\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"iPhone Developer\";", "\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"\";")
           with open(path, "w") as f:
-              f.writelines(new_lines)
+              f.write(s)
           '
+          echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
+          echo "EXPANDED_CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
 
-          # 2. Flutter 설정 파일들에도 주입
-          for f in Flutter/Release.xcconfig Flutter/Generated.xcconfig Flutter/AppFrameworkInfo.plist; do
-            if [ -f "$f" ] && [[ "$f" == *.xcconfig ]]; then
-              echo "DEVELOPMENT_TEAM = 1234567890" >> "$f"
-              echo "CODE_SIGNING_ALLOWED = NO" >> "$f"
-              echo "CODE_SIGNING_REQUIRED = NO" >> "$f"
-              echo "CODE_SIGN_IDENTITY = " >> "$f"
-            fi
-          done
+      - name: Install Pods
+        working-directory: violet/ios
+        run: pod install
 
-      - name: Build iOS Release App
-        working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Build Runner App
+        working-directory: violet/ios
         run: |
-          flutter build ios --release --no-codesign
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            DEVELOPMENT_TEAM=1234567890 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find violet/build/ios -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find violet -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
-          fi
-          echo "Packaging found app: $APP_PATH"
+          APP_PATH=$(find violet/ios/build -name "Runner.app" -type d | grep -E "Release-iphoneos" | head -n 1)
+          echo "Packaging found app from: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           zip -r Violet.ipa Payload
 

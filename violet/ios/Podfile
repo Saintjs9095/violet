@@ -36,7 +36,7 @@ target 'Runner' do
 end
 
 post_install do |installer|
-  # 1. Swift 6 문법 및 import 접근 제어자 치환
+  # 1. Swift 6 문법 대응
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/sending //g' {} +")
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/consuming //g' {} +")
   system("find Pods -name '*.swift' -type f -exec sed -i '' 's/borrowing //g' {} +")
@@ -60,12 +60,11 @@ post_install do |installer|
     end
     
     target.build_configurations.each do |config|
-      # Xcode 16.2 지원 최저 버전(12.0) 이상으로 배포 타깃 강제 상향
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
-
-      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
-        '$(inherited)',
-      ]
+      config.build_settings['DEVELOPMENT_TEAM'] = '1234567890'
+      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+      config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
+      config.build_settings['CODE_SIGN_IDENTITY'] = ''
     end
   end
 end
