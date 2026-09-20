@@ -14,11 +14,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode 15
-        run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          xcodebuild -version
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,11 +29,25 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Update CocoaPods Dependencies
+      - name: Fix Firebase Swift 6 Compatibility in Podfile
         working-directory: violet/ios
         run: |
-          pod repo update
-          pod update FirebaseCoreInternal FirebaseCore FirebaseCrashlytics --no-repo-update || true
+          cat << 'EOF' >> Podfile
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+              target.build_configurations.each do |config|
+                config.build_settings['SWIFT_VERSION'] = '5.0'
+                config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -enable-experimental-feature AccessLevelOnImport -enable-experimental-feature SendingArgsAndResults'
+              end
+            end
+          end
+          EOF
+
+      - name: Install CocoaPods
+        working-directory: violet/ios
+        run: pod install --repo-update
 
       - name: Build iOS (No codesign)
         working-directory: violet
