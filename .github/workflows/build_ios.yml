@@ -34,33 +34,30 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Flutter iOS Assets
-        working-directory: violet
-        run: flutter build ios --config-only --no-codesign
-
-      - name: Install Pods
-        working-directory: violet/ios
-        run: pod install
-
-      - name: Build Xcode Workspace (No codesign)
+      - name: Disable Code Signing in Configurations
         working-directory: violet/ios
         run: |
-          xcodebuild -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+          # Release 빌드 설정에 코드 서명 비활성화 주입
+          echo "CODE_SIGNING_ALLOWED=NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGNING_REQUIRED=NO" >> Flutter/Release.xcconfig
+          echo "CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
+          echo "EXPANDED_CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
+
+          # project.pbxproj 서명 검사 무력화
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' Runner.xcodeproj/project.pbxproj
+
+      - name: Build iOS Release (No codesign)
+        working-directory: violet
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+        run: |
+          flutter build ios --release --no-codesign
 
       - name: Package Payload into IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find violet -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
-          echo "Found app at: $APP_PATH"
-          cp -r "$APP_PATH" Payload/
+          cp -r violet/build/ios/iphoneos/Runner.app Payload/
           zip -r Violet.ipa Payload
 
       - name: Upload IPA Artifact
