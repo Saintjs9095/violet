@@ -43,8 +43,8 @@ class SyncInfoRecord {
 
 class SyncManager {
   static String syncInfoURL(String branch) {
-    return 'https://raw.githubusercontent.com/TaYaKi71751/sync-data/$branch/syncversion.txt';
-  }
+  return 'http://129.225.133.125/syncversion.txt';
+}
 
   static bool firstSync = false;
   static bool syncRequire = false; // database sync require
@@ -239,8 +239,18 @@ class SyncManager {
           }
           await batch.commit();
         });
+// === [추가할 코드 시작: FTS 검색 인덱스 갱신] ===
+      try {
+        await dbraw.execute(
+          "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');"
+        );
+      } catch (e) {
+        Logger.error('[Sync-FTS-Rebuild] E: $e');
+      }
+      // === [추가할 코드 끝] ===
 
-        final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
+        
         await prefs.setInt('synclatest', row.timestamp);
       }
 
