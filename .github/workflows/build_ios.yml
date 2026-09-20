@@ -84,21 +84,17 @@ jobs:
         working-directory: violet/ios
         run: pod install
 
-      - name: Compile Flutter Assets and App Framework
-        working-directory: violet
-        run: |
-          # Flutter assemble을 통해 xcodebuild에 필요한 App.framework 및 Flutter 자산 사전 컴파일
-          flutter assemble -dTargetPlatform=ios -dBuildMode=release release_ios_bundle_flutter_assets
-
       - name: Build Runner Target with xcodebuild
         working-directory: violet/ios
         run: |
+          # Flutter 도구가 내부적으로 사용하는 플래그를 xcodebuild에 직접 전달하여 Dart 컴파일과 Xcode 조립을 동시에 수행
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath derived_data \
+            FLUTTER_SUPPRESS_ANALYTICS=true \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -127,7 +123,7 @@ jobs:
           zip -qr ../Violet.ipa Payload
           cd ..
 
-          echo "Generated IPA Size:"
+          echo "Final IPA Size:"
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
