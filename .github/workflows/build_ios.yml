@@ -33,23 +33,14 @@ jobs:
         working-directory: violet/ios
         run: pod install
 
-      - name: Patch FirebaseCoreInternal Swift Syntax
+      - name: Patch Firebase Pods Swift Syntax
         working-directory: violet/ios
         run: |
-          TARGET_LOCK="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/Utilities/UnfairLock.swift"
-          TARGET_PAYLOAD="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/HeartbeatLogging/HeartbeatsPayload.swift"
-
-          for FILE in "$TARGET_LOCK" "$TARGET_PAYLOAD"; do
-            if [ -f "$FILE" ]; then
-              echo "Patching $FILE..."
-              # sending, consuming, borrowing 키워드 제거
-              sed -i '' 's/sending //g' "$FILE"
-              sed -i '' 's/consuming //g' "$FILE"
-              sed -i '' 's/borrowing //g' "$FILE"
-              # 모든 접근 제어자가 붙은 import를 순수 import로 변환
-              sed -i '' -E 's/^[[:space:]]*(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' "$FILE"
-            fi
-          done
+          echo "Patching all Pod Swift files..."
+          find Pods -name "*.swift" -type f -exec sed -i '' 's/sending //g' {} +
+          find Pods -name "*.swift" -type f -exec sed -i '' 's/consuming //g' {} +
+          find Pods -name "*.swift" -type f -exec sed -i '' 's/borrowing //g' {} +
+          find Pods -name "*.swift" -type f -exec sed -i '' -E 's/^[[:space:]]*(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' {} +
 
       - name: Build iOS (No codesign)
         working-directory: violet
