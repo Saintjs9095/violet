@@ -34,18 +34,16 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Disable Code Signing in Configurations
+      - name: Configure Dummy Team and Bypass Codesign
         working-directory: violet/ios
         run: |
-          # Release 빌드 설정에 코드 서명 비활성화 주입
-          echo "CODE_SIGNING_ALLOWED=NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGNING_REQUIRED=NO" >> Flutter/Release.xcconfig
-          echo "CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
-          echo "EXPANDED_CODE_SIGN_IDENTITY=" >> Flutter/Release.xcconfig
+          # Flutter의 Team ID 검사를 통과시키기 위한 더미 10자리 Team ID 주입
+          sed -i '' -E 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = 1234567890;/g' Runner.xcodeproj/project.pbxproj
+          sed -i '' -E 's/DevelopmentTeam = [^;]*;/DevelopmentTeam = 1234567890;/g' Runner.xcodeproj/project.pbxproj
 
-          # project.pbxproj 서명 검사 무력화
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' Runner.xcodeproj/project.pbxproj
+          # project.pbxproj에 서명 비활성화 플래그 삽입
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/"CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]" = "iPhone Developer";/"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";/g' Runner.xcodeproj/project.pbxproj
 
       - name: Build iOS Release (No codesign)
         working-directory: violet
@@ -57,7 +55,9 @@ jobs:
       - name: Package Payload into IPA
         run: |
           mkdir -p Payload
-          cp -r violet/build/ios/iphoneos/Runner.app Payload/
+          APP_PATH=$(find violet/build/ios -name "Runner.app" -type d | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+          echo "Packaging found app: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
           zip -r Violet.ipa Payload
 
       - name: Upload IPA Artifact
