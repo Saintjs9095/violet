@@ -29,12 +29,20 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Resolve CocoaPods for Swift 5
+      - name: Install Pods
+        working-directory: violet/ios
+        run: pod install
+
+      - name: Patch FirebaseCoreInternal Swift Syntax
         working-directory: violet/ios
         run: |
-          rm -f Podfile.lock
-          pod repo update
-          pod install
+          TARGET_FILE="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/Utilities/UnfairLock.swift"
+          if [ -f "$TARGET_FILE" ]; then
+            echo "Patching $TARGET_FILE..."
+            sed -i '' 's/sending //g' "$TARGET_FILE"
+            sed -i '' 's/consuming //g' "$TARGET_FILE"
+            sed -i '' 's/borrowing //g' "$TARGET_FILE"
+          fi
 
       - name: Build iOS (No codesign)
         working-directory: violet
