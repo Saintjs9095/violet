@@ -37,19 +37,23 @@ jobs:
       - name: Inject Dummy Team and Bypass Codesign
         working-directory: violet/ios
         run: |
-          # 1. pbxproj의 모든 빌드 설정 블록 내부에 DEVELOPMENT_TEAM 강제 삽입
-          sed -i '' 's/buildSettings = {/buildSettings = {\
-  				DEVELOPMENT_TEAM = 1234567890;\
-  				CODE_SIGN_STYLE = Manual;\
-  				CODE_SIGNING_ALLOWED = NO;\
-  				CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
-
-          # 2. xcconfig 파일들에도 팀 ID 및 무서명 설정 주입
+          python3 -c '
+          path = "Runner.xcodeproj/project.pbxproj"
+          with open(path, "r") as f:
+              content = f.read()
+          injection = """buildSettings = {
+          \t\t\t\tDEVELOPMENT_TEAM = 1234567890;
+          \t\t\t\tCODE_SIGN_STYLE = Manual;
+          \t\t\t\tCODE_SIGNING_ALLOWED = NO;
+          \t\t\t\tCODE_SIGN_IDENTITY = "";"""
+          content = content.replace("buildSettings = {", injection)
+          with open(path, "w") as f:
+              f.write(content)
+          '
           echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Release.xcconfig
           echo "CODE_SIGNING_ALLOWED = NO" >> Flutter/Release.xcconfig
           echo "CODE_SIGNING_REQUIRED = NO" >> Flutter/Release.xcconfig
           echo "CODE_SIGN_IDENTITY = " >> Flutter/Release.xcconfig
-          
           echo "DEVELOPMENT_TEAM = 1234567890" >> Flutter/Generated.xcconfig
 
       - name: Build iOS Release (No codesign)
