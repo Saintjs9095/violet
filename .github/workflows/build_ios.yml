@@ -29,19 +29,6 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Install Pods
-        working-directory: violet/ios
-        run: pod install
-
-      - name: Patch Firebase Pods Swift Syntax
-        working-directory: violet/ios
-        run: |
-          echo "Patching all Pod Swift files..."
-          find Pods -name "*.swift" -type f -exec sed -i '' 's/sending //g' {} +
-          find Pods -name "*.swift" -type f -exec sed -i '' 's/consuming //g' {} +
-          find Pods -name "*.swift" -type f -exec sed -i '' 's/borrowing //g' {} +
-          find Pods -name "*.swift" -type f -exec sed -i '' -E 's/^[[:space:]]*(public|internal|private|fileprivate|package)[[:space:]]+import/import/g' {} +
-
       - name: Build iOS (No codesign)
         working-directory: violet
         run: flutter build ios --release --no-codesign
