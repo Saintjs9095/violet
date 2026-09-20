@@ -36,12 +36,21 @@ jobs:
       - name: Patch FirebaseCoreInternal Swift Syntax
         working-directory: violet/ios
         run: |
-          TARGET_FILE="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/Utilities/UnfairLock.swift"
-          if [ -f "$TARGET_FILE" ]; then
-            echo "Patching $TARGET_FILE..."
-            sed -i '' 's/sending //g' "$TARGET_FILE"
-            sed -i '' 's/consuming //g' "$TARGET_FILE"
-            sed -i '' 's/borrowing //g' "$TARGET_FILE"
+          # 1. sending / consuming 키워드 제거
+          TARGET_LOCK="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/Utilities/UnfairLock.swift"
+          if [ -f "$TARGET_LOCK" ]; then
+            sed -i '' 's/sending //g' "$TARGET_LOCK"
+            sed -i '' 's/consuming //g' "$TARGET_LOCK"
+            sed -i '' 's/borrowing //g' "$TARGET_LOCK"
+            sed -i '' 's/public import/import/g' "$TARGET_LOCK"
+            sed -i '' 's/internal import/import/g' "$TARGET_LOCK"
+          fi
+
+          # 2. AccessLevelOnImport 에러 유발 구문 제거
+          TARGET_PAYLOAD="Pods/FirebaseCoreInternal/FirebaseCore/Internal/Sources/HeartbeatLogging/HeartbeatsPayload.swift"
+          if [ -f "$TARGET_PAYLOAD" ]; then
+            sed -i '' 's/public import/import/g' "$TARGET_PAYLOAD"
+            sed -i '' 's/internal import/import/g' "$TARGET_PAYLOAD"
           fi
 
       - name: Build iOS (No codesign)
