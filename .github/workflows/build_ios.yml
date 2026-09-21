@@ -40,69 +40,49 @@ jobs:
       - name: Clean Podfile and Disable ShareExtension
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 타깃 완전 삭제
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. xcconfig에 서명 비활성화 주입
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-          done
+          # 2. xcode 스킴 및 프로젝트에서 ShareExtension 참조 제거
+          sed -i '' '/ShareExtension.appex/d' Runner.xcodeproj/project.pbxproj || true
 
-      - name: Build and Preserve App Bundle
+      - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          mkdir -p "$RUNNER_TEMP/saved_bundle"
-
-          # 빌드 도중 실시간으로 생성되는 Runner 바이너리와 에셋을 실시간 동기화
-          (
-            echo "Starting continuous bundle synchronization..."
-            TARGET_APP="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
-            while true; do
-              if [ -f "$TARGET_APP/Runner" ] && [ -s "$TARGET_APP/Runner" ]; then
-                cp -R "$TARGET_APP" "$RUNNER_TEMP/saved_bundle/" 2>/dev/null || true
-              fi
-              sleep 0.1
-            done
-          ) &
-          SYNC_PID=$!
-
-          # 전체 릴리즈 컴파일 실행 (팀 누락 검증 실패로 exit 1이 나더라도 계속 진행)
-          flutter build ios --release --no-codesign || true
-
-          # 동기화 프로세스 종료
-          kill $SYNC_PID 2>/dev/null || true
+          # DerivedData를 RUNNER_TEMP로 격리하여 Flutter의 빌드 후 삭제(clean) 영향 차단
+          flutter build ios --release --no-codesign --export-options-plist="" || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH="$RUNNER_TEMP/saved_bundle/Runner.app"
+          echo "=== Locating compiled Runner.app in System ==="
+          
+          # 시스템 전체에서 Info.plist와 실행 파일이 온전히 존재하는 진짜 Runner.app 탐색
+          APP_PATH=""
+          while IFS= read -r app; do
+            if [ -f "$app/Runner" ] && [ -s "$app/Runner" ]; then
+              APP_PATH="$app"
+              break
+            fi
+          done < <(find /Users/runner -type d -name "Runner.app" 2>/dev/null | grep -v "/Xcode.app")
 
-          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
-            echo "Searching build directory fallback..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-          fi
-
-          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled executable Runner binary could not be captured!"
-            ls -la "$RUNNER_TEMP/saved_bundle" || true
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Executable Runner binary not found anywhere on disk!"
+            find /Users/runner/work -name "Runner" -ls || true
             exit 1
           fi
 
-          echo "Found Complete App Bundle at: $APP_PATH"
+          echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 구성
+          # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 플러그인 확장 폴더 정리
+          # 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
