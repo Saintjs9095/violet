@@ -37,48 +37,68 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Disable ShareExtension
+      - name: Clean Podfile and Prepare Build
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # Xcode 프로젝트(pbxproj) 서명 허용 해제
-          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = "";/PROVISIONING_PROFILE_SPECIFIER = ""; CODE_SIGNING_ALLOWED = NO;/g' Runner.xcodeproj/project.pbxproj
-
+          # 2. CocoaPods 및 Runner 서명 강제 비활성화
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
             echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
             echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
             echo "CODE_SIGN_IDENTITY = " >> "$cfg"
+            echo "EXPANDED_CODE_SIGN_IDENTITY = " >> "$cfg"
           done
 
-      - name: Build Unsigned Release App Bundle
+      - name: Build Runner App via Flutter Backend
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          flutter build ios --release --no-codesign || true
+          # 1. Flutter 엔진 AOT 바이너리 및 플러그인 등록 파일 선행 빌드
+          flutter assemble -dTargetPlatform=ios -dBuildMode=release release_unpack_ios
+
+          # 2. xcodebuild로 직접 바이너리 컴파일 (Flutter CLI의 자동 삭제 로직을 완전 우회)
+          cd ios
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/xcode_output" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
+          APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Searching discovered bundle..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Fallback search in RUNNER_TEMP..."
+            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
-          echo "Selected App Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Compiled Runner.app not found!"
+            find "$RUNNER_TEMP" -maxdepth 5 || true
+            exit 1
+          fi
+
+          echo "Target Bundle Path: $APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 잔여 플러그인 폴더 제거
+          # 플러그인 확장 폴더 정리
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
