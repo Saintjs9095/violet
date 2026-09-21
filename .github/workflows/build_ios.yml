@@ -37,12 +37,12 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Patch Xcode Script to Bypass Codesign
-        working-directory: violet
+      - name: Clean Podfile and Override Codesign Binary
+        working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 타깃 정리
           python3 -c '
-          with open("ios/Podfile", "r") as f:
+          with open("Podfile", "r") as f:
               lines = f.readlines()
           new_lines = []
           skip = False
@@ -50,29 +50,32 @@ jobs:
               if "target '\''ShareExtension'\''" in line:
                   skip = True
                   continue
-              if skip and line.strip() == "end":
-                  skip = False
-                  continue
-              if not skip:
-                  new_lines.append(line)
-          with open("ios/Podfile", "w") as f:
-              f.writelines(new_lines)
+          if skip and line.strip() == "end":
+              skip = False
+              continue
+          if not skip:
+              new_lines.append(line)
+      with open("Podfile", "w") as f:
+          f.writelines(new_lines)
           '
-          cd ios && pod install && cd ..
+          pod install
 
-          # 2. Flutter의 xcode_backend.sh 스크립트 내 하드코딩된 codesign 명령을 전부 exit 0(참)으로 패치
-          FLUTTER_ROOT=$(flutter doctor -v | grep "Flutter version" | sed -E 's/.* at (.*)/\1/')
-          BACKEND_SCRIPT="$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh"
-          echo "Patching Flutter backend script at $BACKEND_SCRIPT"
-          sed -i '' 's/codesign --force --verbose/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
-          sed -i '' 's/codesign --force/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
+          # 2. 모든 빌드 페이즈 스크립트의 codesign 호출을 무조건 통과시키는 전역 래퍼 생성
+          sudo mkdir -p /usr/local/bin
+          sudo tee /usr/local/bin/codesign > /dev/null << 'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+          sudo chmod +x /usr/local/bin/codesign
 
       - name: Build Runner App via xcodebuild
         working-directory: violet/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # codesign 호출이 무력화되었으므로 xcodebuild가 에러 없이 바이너리를 끝까지 빌드합니다.
+          # /usr/local/bin을 최상단에 두어 모든 빌드 페이즈가 더미 서명을 바라보게 설정
+          export PATH="/usr/local/bin:$PATH"
+
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -92,12 +95,13 @@ jobs:
           APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" | grep -E "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching fallback..."
+            echo "Searching whole RUNNER_TEMP for Runner.app..."
             APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
             echo "::error::Compiled Runner.app not found!"
+            find "$RUNNER_TEMP" -maxdepth 4 || true
             exit 1
           fi
 
@@ -109,10 +113,10 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # 충돌 방지용 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # ZIP 압축
+          # 압축
           zip -r -q Violet.ipa Payload
 
           echo "=== Final IPA File Details ==="
