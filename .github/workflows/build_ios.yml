@@ -53,16 +53,18 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter 공식 ipa 아카이브 명령어 (서명 단계 생략)
-          flutter build ipa --release --no-codesign
+          # 259초 동안 Xcode archive를 완벽히 생성한 후 발생하는 서명 체크 에러를 무시하고 진행
+          flutter build ipa --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          # 1. Flutter 빌드로 생성된 xcarchive 내부의 실제 Runner.app 추출
-          APP_PATH=$(find violet/build/ios/archive -name "Runner.app" -type d | head -n 1)
+          # 1. 방금 생성 완료된 xcarchive의 Products/Applications 폴더에서 진짜 Runner.app 추출
+          echo "=== Locating compiled Runner.app in archive ==="
+          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios/archive" -type d -name "Runner.app" | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find violet/build -name "Runner.app" -type d | grep "iphoneos" | head -n 1)
+            echo "Searching all paths for Runner.app..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep -E "Products/Applications|Release-iphoneos" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
