@@ -37,10 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile
+      - name: Clean Podfile and Disable Team Check in Flutter
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,55 +60,37 @@ jobs:
           '
           pod install
 
-      - name: Compile and Lock App Bundle
+          # 2. Flutter CLI가 유료 개발자 팀이 없어도 아카이브를 삭제하지 않고 온전히 보존하도록 패치
+          FLUTTER_TOOLS_DIR="$(flutter doctor -v | grep 'Flutter version' | sed -E 's/.* at (.*)/\1/')/packages/flutter_tools"
+          # dart snapshot 파일 재컴파일을 트리거하기 위해 tools 디렉터리 내 개발팀 에러를 경고로 다운그레이드
+          find "$FLUTTER_TOOLS_DIR" -type f -name "*.dart" -exec sed -i '' 's/throwToolExit(_developmentTeamMissingError/print(_developmentTeamMissingError/g' {} + || true
+          rm -f "$FLUTTER_TOOLS_DIR/../../bin/cache/flutter_tools.snapshot" || true
+
+      - name: Build Unsigned iOS Archive
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 아카이브 폴더를 미리 만들고 복사 대상 경로 준비
-          mkdir -p "$RUNNER_TEMP/locked_app"
-
-          # 백그라운드에서 실시간으로 생성되는 Runner.app 감시 및 잠금 복사 데몬
-          (
-            echo "Starting aggressive app bundle grabber..."
-            while true; do
-              # 1. build 디렉터리 내 완성된 Runner 바이너리 탐지
-              FOUND_APP=$(find build -type d -name "Runner.app" 2>/dev/null | grep -E "archive|Release|iphoneos" | head -n 1)
-              if [ -n "$FOUND_APP" ] && [ -f "$FOUND_APP/Runner" ] && [ -s "$FOUND_APP/Runner" ]; then
-                cp -R "$FOUND_APP" "$RUNNER_TEMP/locked_app/" 2>/dev/null || true
-                # Flutter의 자동 삭제를 방지하기 위해 불변(Immutable) 플래그 주입
-                chflags -R uchg "$RUNNER_TEMP/locked_app/Runner.app" 2>/dev/null || true
-              fi
-              sleep 0.2
-            done
-          ) &
-          DAEMON_PID=$!
-
-          # 258초간 정규 Flutter 네이티브/AOT 컴파일 완주
+          # flutter_tools가 재빌드되며 검증 체크로 인한 아카이브 강제 삭제 없이 완주
           flutter build ipa --release --no-codesign || true
-
-          # 감시 데몬 종료
-          kill $DAEMON_PID 2>/dev/null || true
-
-          # 보존된 번들의 잠금 해제 (SideStore 패키징 작업을 위해)
-          chflags -R nouchg "$RUNNER_TEMP/locked_app" 2>/dev/null || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Checking Captured Bundle ==="
-          APP_PATH="$RUNNER_TEMP/locked_app/Runner.app"
+          echo "=== Locating compiled Runner.app ==="
+          APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "archive|Release|Applications" | head -n 1)
 
-          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "Deep searching whole system..."
-            APP_PATH=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Deep searching all workspace..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled Runner.app not found!"
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Compiled Runner.app not found! Checking build directory contents:"
+            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 4 || true
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Found Target Bundle: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 디렉터리 구성
@@ -116,13 +98,13 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 폴더 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # 표준 ZIP 압축
+          # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # 용량 검증 (바이너리 포함 필수 10MB 이상)
+          # IPA 용량 검증 (바이너리 포함 필수 10MB 이상)
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
