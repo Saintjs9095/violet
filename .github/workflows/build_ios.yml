@@ -40,7 +40,7 @@ jobs:
       - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,64 +60,61 @@ jobs:
           '
           pod install
 
-      - name: Build and Intercept App Bundle
+      - name: Build Flutter iOS Release App
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          mkdir -p "$RUNNER_TEMP/saved_bundle"
+          # Flutter 공식 릴리즈 빌드 준비 (엔진 바이너리 & AOT 생성)
+          flutter build ios --release --no-codesign --config-only
 
-          # 0.5초 간격으로 violet/build 내부의 모든 .app 바이너리를 실시간 탐지하여 복사
-          (
-            echo "Starting aggressive bundle grabber..."
-            while true; do
-              for app in $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "*.app" 2>/dev/null); do
-                if [ -f "$app/Info.plist" ] && [ -f "$app/Runner" ] && [ -s "$app/Runner" ]; then
-                  cp -R "$app" "$RUNNER_TEMP/saved_bundle/Runner.app" 2>/dev/null || true
-                fi
-              done
-              sleep 0.5
-            done
-          ) &
-          DAEMON_PID=$!
+          # Flutter 환경변수를 완전히 포함하여 xcodebuild 직접 아카이빙
+          cd ios
+          export FLUTTER_ROOT="$(flutter doctor -v | grep 'Flutter version' | sed -E 's/.* at (.*)/\1/')"
+          export FLUTTER_APPLICATION_PATH="$GITHUB_WORKSPACE/violet"
 
-          # 5분 동안 전체 네이티브/엔진 AOT 컴파일 수행
-          flutter build ipa --release --no-codesign || true
-
-          # 감시 데몬 종료
-          kill $DAEMON_PID 2>/dev/null || true
+          xcodebuild archive \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating Intercepted Runner.app ==="
-          APP_PATH="$RUNNER_TEMP/saved_bundle/Runner.app"
+          echo "=== Locating compiled Runner.app ==="
+          APP_PATH="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app"
 
           if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "Searching all candidate locations..."
-            APP_PATH=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+            echo "Searching fallback..."
+            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications|Release" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled executable Runner binary could not be captured!"
-            find "$RUNNER_TEMP" "$GITHUB_WORKSPACE/violet/build" -maxdepth 5 || true
+            echo "::error::Compiled executable Runner binary could not be found!"
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # SideStore 충돌 방지: 불필요한 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # IPA 용량 검증 (최소 10MB)
+          # 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
