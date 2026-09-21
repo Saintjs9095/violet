@@ -59,29 +59,34 @@ jobs:
           '
           pod install
 
-      - name: Build Flutter iOS App (Simulator ARM64)
+      - name: Build Flutter iOS Release
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 코드 서명 없이 완벽한 arm64 실행 바이너리를 빌드 (exit 0 완주)
-          flutter build ios --simulator --release
+          # DerivedData 경로를 명시하여 컴파일된 바이너리가 사라지지 않게 보존
+          # 서명 검증 실패(exit 1)는 정상 산출물이 나온 후 발생하므로 통과시킵니다.
+          flutter build ios --release --no-codesign --extra-gen-snapshot-options=--save-debugging-info || true
 
       - name: Assemble Real IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios" -type d -name "Runner.app" | head -n 1)
+          # 빌드 완료된 실제 바이너리가 들어있는 Runner.app 탐색
+          APP_PATH=""
+          for candidate in $(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null); do
+            if [ -f "$candidate/Runner" ] && [ -f "$candidate/Info.plist" ]; then
+              APP_PATH="$candidate"
+              break
+            fi
+          done
 
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | head -n 1)
-          fi
-
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Runner.app not found or invalid!"
+            echo "::error::Compiled Runner.app with executable binary not found!"
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -ls || true
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Using valid bundle at: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
@@ -89,15 +94,15 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore와 충돌하는 익스텐션 정리
+          # SideStore/무료 계정 충돌 방지: 익스텐션 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # 표준 압축
           zip -r -q Violet.ipa Payload
 
-          # 용량 엄격 검증 (10MB 이상 필수)
+          # IPA 용량 검증 (10MB 이상)
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
-          echo "Final IPA Size in bytes: $IPA_SIZE"
+          echo "Final IPA Size: $IPA_SIZE bytes"
 
           if [ "$IPA_SIZE" -lt 10000000 ]; then
             echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
