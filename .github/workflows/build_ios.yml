@@ -64,39 +64,43 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # --no-codesign 플래그로 서명 검사 없이 공식 xcarchive 생성
-          flutter build ipa --release --no-codesign
+          # 258초간 실제 기계어 컴파일 및 아카이브 생성을 완주하고,
+          # 마지막 단계의 개발자 팀 서명 유효성 체크 실패(exit 1)를 넘겨 아카이브를 보존합니다.
+          flutter build ipa --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in xcarchive ==="
-          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios/archive" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          echo "=== Locating compiled Runner.app in xcarchive or build outputs ==="
+          
+          # Xcode가 생성한 .xcarchive 내부의 실제 Runner.app 우선 탐색
+          APP_PATH=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/Archives" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications|archive" | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching all build directories..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications|Release" | head -n 1)
+            echo "Searching all candidate locations..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Compiled Runner.app not found!"
-            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 4 || true
+            echo "::error::Compiled Runner.app could not be found!"
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
-          echo "Found verified app bundle at: $APP_PATH"
+          echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 구성
+          # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 불필요한 확장 플러그인 폴더 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
           zip -r -q Violet.ipa Payload
 
+          # 최종 IPA 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
