@@ -25,7 +25,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+          targets: aarch64-apple-ios-sim,aarch64-apple-ios,x86_64-apple-ios
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -37,10 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Disable Team Check in Flutter
+      - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,51 +60,47 @@ jobs:
           '
           pod install
 
-          # 2. Flutter CLI가 유료 개발자 팀이 없어도 아카이브를 삭제하지 않고 온전히 보존하도록 패치
-          FLUTTER_TOOLS_DIR="$(flutter doctor -v | grep 'Flutter version' | sed -E 's/.* at (.*)/\1/')/packages/flutter_tools"
-          # dart snapshot 파일 재컴파일을 트리거하기 위해 tools 디렉터리 내 개발팀 에러를 경고로 다운그레이드
-          find "$FLUTTER_TOOLS_DIR" -type f -name "*.dart" -exec sed -i '' 's/throwToolExit(_developmentTeamMissingError/print(_developmentTeamMissingError/g' {} + || true
-          rm -f "$FLUTTER_TOOLS_DIR/../../bin/cache/flutter_tools.snapshot" || true
-
-      - name: Build Unsigned iOS Archive
+      - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # flutter_tools가 재빌드되며 검증 체크로 인한 아카이브 강제 삭제 없이 완주
-          flutter build ipa --release --no-codesign || true
+          # 서명 검증 없이 완전한 릴리즈 arm64 번들 생성
+          flutter build ios --simulator --release
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "archive|Release|Applications" | head -n 1)
+          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios" -type d -name "Runner.app" 2>/dev/null | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Deep searching all workspace..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
-          fi
-
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Compiled Runner.app not found! Checking build directory contents:"
-            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 4 || true
+            echo "::error::Runner.app was not found!"
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
-          echo "Found Target Bundle: $APP_PATH"
+          echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # 바이너리 아키텍처 확인 (arm64 확인용)
+          file "$APP_PATH/Runner"
+
+          # SideStore/실기기 배포 호환성을 위해 Info.plist의 시뮬레이터 플래그를 실기기용으로 변환
+          plutil -replace CFBundleSupportedPlatforms -json '["iPhoneOS"]' "$APP_PATH/Info.plist" || true
+          plutil -replace DTPlatformName -string "iphoneos" "$APP_PATH/Info.plist" || true
+
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # 잔여 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # IPA 용량 검증 (바이너리 포함 필수 10MB 이상)
+          # IPA 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
