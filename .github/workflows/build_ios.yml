@@ -37,10 +37,9 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Neutralize All Codesigning
+      - name: Remove ShareExtension from Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,62 +59,31 @@ jobs:
           '
           pod install
 
-          # 2. CocoaPods 프레임워크 서명 무력화
-          find Targets\ Support\ Files -name "*-frameworks.sh" -exec sed -i '' 's/code_sign_if_enabled/echo "skipped signing"/g' {} + || true
-
-          # 3. Flutter 자체 백엔드 서명 스크립트 무력화
-          FLUTTER_ROOT=$(flutter doctor -v | grep "Flutter version" | sed -E 's/.* at (.*)/\1/')
-          BACKEND_SCRIPT="$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh"
-          if [ -f "$BACKEND_SCRIPT" ]; then
-            sed -i '' 's/codesign --force --verbose/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
-            sed -i '' 's/codesign --force/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
-          fi
-
-          # 4. PhaseScriptExecution 전용 더미 codesign 생성 후 절대경로 바인딩
-          sudo mkdir -p /tmp/bin
-          sudo tee /tmp/bin/codesign > /dev/null << 'EOF'
-          #!/bin/bash
-          exit 0
-          EOF
-          sudo chmod +x /tmp/bin/codesign
-
-      - name: Build Runner App via xcodebuild
-        working-directory: violet/ios
+      - name: Build Unsigned iOS Archive via Flutter
+        working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          export PATH="/tmp/bin:$PATH"
-
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/xcode_output" \
-            CODE_SIGN_STYLE="Manual" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # --no-codesign 플래그로 서명 검사 없이 공식 xcarchive 생성
+          flutter build ipa --release --no-codesign
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" | grep -E "Release-iphoneos" | head -n 1)
+          echo "=== Locating compiled Runner.app in xcarchive ==="
+          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios/archive" -type d -name "Runner.app" 2>/dev/null | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching fallback..."
-            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
+            echo "Searching all build directories..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications|Release" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
             echo "::error::Compiled Runner.app not found!"
-            find "$RUNNER_TEMP" -maxdepth 4 || true
+            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 4 || true
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Found verified app bundle at: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
@@ -123,7 +91,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # SideStore 충돌 방지: 불필요한 확장 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
