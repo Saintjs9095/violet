@@ -40,24 +40,8 @@ jobs:
       - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 타깃 제거
-          python3 -c '
-          with open("Podfile", "r") as f:
-              lines = f.readlines()
-          new_lines = []
-          skip = False
-          for line in lines:
-              if "target '\''ShareExtension'\''" in line:
-                  skip = True
-                  continue
-          if skip and line.strip() == "end":
-              skip = False
-              continue
-          if not skip:
-              new_lines.append(line)
-          with open("Podfile", "w") as f:
-              f.writelines(new_lines)
-          '
+          # sed를 사용하여 target 'ShareExtension' 블록을 안전하게 삭제 (파이썬 인덴트 에러 방지)
+          sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
       - name: Build Unsigned Release App Bundle
@@ -65,7 +49,7 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 380초 컴파일 완료 후 팀 서명 에러(exit 1)를 넘겨 DerivedData 결과물을 보존
+          # 380초 릴리즈 컴파일 완주 후 팀 서명 에러(exit 1)를 무시하고 DerivedData에 생성된 바이너리를 보존
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
@@ -113,7 +97,7 @@ jobs:
           fi
 
       - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Violet-Custom-IPA
-          path: Violet.ipa
+    uses: actions/upload-artifact@v4
+    with:
+      name: Violet-Custom-IPA
+      path: Violet.ipa
