@@ -37,10 +37,9 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Remove ShareExtension and Configure Pods
+      - name: Clean ShareExtension from Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,42 +59,46 @@ jobs:
           '
           pod install
 
-      - name: Build Runner Binary via Xcode
+      - name: Compile and Capture Real App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter 사전 구성
-          flutter build ios --config-only --release --no-codesign
+          # 백그라운드에서 빌드 산출물(Runner.app)이 완성되는 즉시 보존 디렉터리로 복사하는 감시 프로세스 실행
+          mkdir -p "$RUNNER_TEMP/captured_app"
+          (
+            while true; do
+              FOUND_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" build -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+              if [ -n "$FOUND_APP" ] && [ -f "$FOUND_APP/Runner" ] && [ -s "$FOUND_APP/Runner" ]; then
+                cp -R "$FOUND_APP" "$RUNNER_TEMP/captured_app/" 2>/dev/null || true
+              fi
+              sleep 2
+            done
+          ) &
+          WATCHER_PID=$!
 
-          # CocoaPods의 모든 타깃 및 Runner에 무서명 빌드 강제
-          cd ios
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ../build_output \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            EXPANDED_CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            DEVELOPMENT_TEAM="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # 정식 Flutter 빌드 실행 (200초 이상 실제 컴파일 수행)
+          flutter build ios --release --no-codesign || true
 
-      - name: Assemble Real IPA
+          # 감시 프로세스 종료
+          kill $WATCHER_PID 2>/dev/null || true
+
+      - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find violet/build_output -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
+          echo "=== Checking captured app bundle ==="
+          APP_PATH="$RUNNER_TEMP/captured_app/Runner.app"
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Compiled Runner.app not found under build_output!"
-            find violet/build_output -name "Runner*" || true
+          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "Checking fallback locations..."
+            APP_PATH=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "captured|Release" | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled executable Runner binary was not captured!"
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Captured valid Runner binary at: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
@@ -103,15 +106,15 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore와 충돌하는 익스텐션 제거
+          # SideStore 충돌 방지: 익스텐션 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # ZIP 압축
+          # 표준 압축
           zip -r -q Violet.ipa Payload
 
-          # 용량 검증 (10MB 이상 필수)
+          # IPA 용량 검증 (최소 10MB)
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
-          echo "Final IPA Size: $IPA_SIZE bytes"
+          echo "Final IPA Size in bytes: $IPA_SIZE"
 
           if [ "$IPA_SIZE" -lt 10000000 ]; then
             echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
