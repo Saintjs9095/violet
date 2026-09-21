@@ -37,10 +37,15 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Workspace and Pods
+      - name: Pre-build Flutter Frameworks
+        working-directory: violet
+        run: |
+          flutter build ios --config-only --release --no-codesign
+
+      - name: Remove ShareExtension and Configure Ad-Hoc Signing
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 블록 제거
+          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,44 +65,65 @@ jobs:
           '
           pod install
 
-      - name: Build Runner Release Bundle
-        working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+          # 2. 로컬 임시 서명(Ad-Hoc: "-") 주입 - 개발자 계정 없이 완전한 바이너리 패키징 허용
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "CODE_SIGN_STYLE = Manual" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
+            echo "EXPANDED_CODE_SIGN_IDENTITY = -" >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = YES" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
+            echo "DEVELOPMENT_TEAM = " >> "$cfg"
+            echo "PROVISIONING_PROFILE_SPECIFIER = " >> "$cfg"
+          done
+
+      - name: Build Runner App (Ad-Hoc)
+        working-directory: violet/ios
         run: |
-          # Flutter 공식 빌드를 수행하되, 서명 검사로 인한 종료(exit 1)를 통과시킵니다.
-          flutter build ios --release --no-codesign || true
+          # Ad-Hoc(-) 서명으로 바이너리를 끝까지 정상 빌드
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath derived_data \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE="Manual" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
-      - name: Assemble Real IPA
+      - name: Package Payload into SideStore IPA
         run: |
-          # Flutter가 실제 기계어 바이너리(ARM64)와 에셋을 완성해 둔 디렉터리를 탐색
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep -E "Release-iphoneos|iphoneos" | head -n 1)
+          APP_PATH=$(find violet/ios/derived_data -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
 
-          if [ -z "$APP_PATH" ]; then
-            echo "Searching all Runner.app instances..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | head -n 1)
-          fi
-
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Runner.app could not be found!"
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Built Runner.app was not found!"
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Found compiled app bundle at: $APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 설치 에러를 유발하는 확장 폴더 제거
+          # SideStore/AltStore 충돌 방지: 불필요한 플러그인 확장 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # 표준 ZIP 압축
+          # 표준 압축
           zip -r -q Violet.ipa Payload
 
-          echo "=== Generated IPA Details ==="
+          # 파일 크기 검증
+          IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
+          echo "Final IPA Size in bytes: $IPA_SIZE"
+
+          if [ "$IPA_SIZE" -lt 10000000 ]; then
+            echo "::error::Violet.ipa is smaller than 10MB! Build failed."
+            exit 1
+          fi
+
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
