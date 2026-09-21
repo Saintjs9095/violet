@@ -37,10 +37,14 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Completely Remove ShareExtension from Xcode Project
-        working-directory: violet/ios
+      - name: Prepare Flutter and Pods
+        working-directory: violet
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Flutter 엔진 파일 및 프레임워크 사전 빌드
+          flutter build ios --config-only --release --no-codesign
+
+          # 2. Podfile에서 ShareExtension 타깃 제거
+          cd ios
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,54 +64,36 @@ jobs:
           '
           pod install
 
-          # 2. project.pbxproj에서 ShareExtension 타깃 참조 및 의존성을 완전히 제거하고 Ad-Hoc 서명 주입
-          python3 -c '
-          import re
-          path = "Runner.xcodeproj/project.pbxproj"
-          with open(path, "r") as f:
-              data = f.read()
-
-          # ShareExtension 관련 타깃 의존성 라인 제거
-          data = re.sub(r".*ShareExtension.*", "", data)
-
-          # 서명 설정을 Ad-Hoc(-)으로 강제 통일
-          data = re.sub(r"CODE_SIGN_IDENTITY = [^;]+;", "CODE_SIGN_IDENTITY = \"-\";", data)
-          data = re.sub(r"CODE_SIGN_STYLE = [^;]+;", "CODE_SIGN_STYLE = Manual;", data)
-          data = re.sub(r"DEVELOPMENT_TEAM = [^;]+;", "DEVELOPMENT_TEAM = \"\";", data)
-          
-          with open(path, "w") as f:
-              f.write(data)
-          print("PBXPROJ successfully cleaned of ShareExtension and patched to Ad-Hoc!")
-          '
-
-      - name: Build Runner iOS App Bundle
-        working-directory: violet
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Build Runner App via xcodebuild
+        working-directory: violet/ios
         run: |
-          # ShareExtension이 완전히 제거된 상태이므로 오직 Runner 메인 앱만 빌드됩니다.
-          flutter build ios --release --no-codesign || true
+          # Runner 앱만 온전하게 빌드하여 build_output 디렉터리에 산출
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/xcode_output" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          APP_PATH=""
+          APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" | grep -E "Release-iphoneos" | head -n 1)
 
-          # Runner.app 탐색
-          for candidate in \
-            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
-            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
-            $(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1) \
-            $(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1); do
-            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Searching whole RUNNER_TEMP for Runner.app..."
+            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
+          fi
 
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Runner.app could not be found!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Compiled Runner.app not found!"
+            find "$RUNNER_TEMP" -maxdepth 4 || true
             exit 1
           fi
 
@@ -119,18 +105,17 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 잔여 익스텐션 디렉터리 정리
+          # 충돌 방지용 잔여 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # 표준 ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # 최종 IPA 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
-          echo "Final IPA Size in bytes: $IPA_SIZE"
+          echo "Final IPA Size: $IPA_SIZE bytes"
 
           if [ "$IPA_SIZE" -lt 10000000 ]; then
             echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
