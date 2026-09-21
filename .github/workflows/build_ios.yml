@@ -40,13 +40,12 @@ jobs:
       - name: Pre-build Flutter App Bundle
         working-directory: violet
         run: |
-          # 1. Flutter 네이티브 엔진 및 플러그인 프레임워크 사전 생성
-          flutter build ios --config-only --release
+          # 서명 검사를 완전히 무시하고 Flutter 빌드 환경 설정만 안전하게 생성
+          flutter build ios --config-only --release --no-codesign
 
       - name: Remove ShareExtension and Configure Pods
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 타깃 삭제
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -69,13 +68,14 @@ jobs:
       - name: Compile Real App Binary via Flutter Assembler
         working-directory: violet
         run: |
-          # Flutter assemble을 통해 실제 Dart AOT 바이너리(App.framework) 강제 생성
+          # Dart 코드를 실제 AOT 기계어로 사전 컴파일
           flutter assemble -o ios/Flutter/App.framework -dTargetPlatform=ios -dBuildMode=release release_ios_bundle_flutter_assets
 
       - name: Build Runner App directly with Xcode
         working-directory: violet/ios
         run: |
-          # xcconfig를 직접 적용하여 CocoaPods 및 Flutter 라이브러리를 단일 바이너리로 컴파일
+          # 무서명(NO) 시 바이너리가 증발하는 버그를 막기 위해
+          # 로컬 가짜 서명(Ad-Hoc: "-")을 강제 적용하여 온전한 런타임 앱을 컴파일
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -83,15 +83,16 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath derived_data \
             CODE_SIGN_STYLE="Manual" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             ONLY_ACTIVE_ARCH=NO
 
       - name: Assemble Real IPA
         run: |
-          # 빌드된 Runner.app 실제 위치 탐색
+          # derived_data에 안전하게 저장된 실제 Runner.app 추출
           APP_PATH=$(find violet/ios/derived_data -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
@@ -102,17 +103,18 @@ jobs:
           echo "Found compiled app bundle at: $APP_PATH"
           ls -la "$APP_PATH"
 
-          # SideStore 규격 Payload 패키징
+          # Payload 패키징
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 확장 기능 제거
+          # SideStore 충돌 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
+          # 최종 압축
           zip -r -q Violet.ipa Payload
 
-          # IPA 크기 엄격 검증 (10MB 미만 시 실패)
+          # IPA 크기 엄격 검증
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
           echo "Final IPA Size in bytes: $IPA_SIZE"
 
