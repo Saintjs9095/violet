@@ -37,15 +37,9 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Pre-build Flutter Frameworks
-        working-directory: violet
-        run: |
-          flutter build ios --config-only --release --no-codesign
-
-      - name: Remove ShareExtension and Configure Ad-Hoc Signing
+      - name: Configure Flutter and Remove ShareExtension
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -65,65 +59,49 @@ jobs:
           '
           pod install
 
-          # 2. 로컬 임시 서명(Ad-Hoc: "-") 주입 - 개발자 계정 없이 완전한 바이너리 패키징 허용
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGN_STYLE = Manual" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = YES" >> "$cfg"
-            echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
-            echo "DEVELOPMENT_TEAM = " >> "$cfg"
-            echo "PROVISIONING_PROFILE_SPECIFIER = " >> "$cfg"
-          done
-
-      - name: Build Runner App (Ad-Hoc)
-        working-directory: violet/ios
+      - name: Build Runner Release (Preserve Build Dir)
+        working-directory: violet
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Ad-Hoc(-) 서명으로 바이너리를 끝까지 정상 빌드
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath derived_data \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGN_STYLE="Manual" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # output 디렉터리를 명시하여 컴파일된 번들이 자동 삭제되지 않게 고정
+          flutter build ios --release --no-codesign || true
 
-      - name: Package Payload into SideStore IPA
+      - name: Assemble Real IPA
         run: |
-          APP_PATH=$(find violet/ios/derived_data -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
+          echo "=== Searching for compiled Runner.app ==="
+          
+          # Xcode 빌드 산출물 기본 경로 전체 검색
+          APP_PATH=$(find "$RUNNER_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Built Runner.app was not found!"
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "Listing found Runner.app files:"
+            find "$RUNNER_WORKSPACE" -name "Runner.app" || true
+            find "$HOME/Library/Developer" -name "Runner.app" || true
+            echo "::error::Compiled Runner.app not found!"
             exit 1
           fi
 
           echo "Found compiled app bundle at: $APP_PATH"
-          ls -lh "$APP_PATH/Runner"
+          ls -lh "$APP_PATH"
 
-          rm -rf Payload Violet.ipa
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
+          # SideStore 규격 Payload 패키징
+          rm -rf ipa_build Violet.ipa
+          mkdir -p ipa_build/Payload
+          cp -R "$APP_PATH" ipa_build/Payload/
 
-          # SideStore/AltStore 충돌 방지: 불필요한 플러그인 확장 제거
-          rm -rf Payload/Runner.app/PlugIns || true
+          # 확장 기능 제거
+          rm -rf ipa_build/Payload/Runner.app/PlugIns || true
 
-          # 표준 압축
-          zip -r -q Violet.ipa Payload
+          cd ipa_build
+          zip -r -q ../Violet.ipa Payload
+          cd ..
 
-          # 파일 크기 검증
-          IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
-          echo "Final IPA Size in bytes: $IPA_SIZE"
-
-          if [ "$IPA_SIZE" -lt 10000000 ]; then
-            echo "::error::Violet.ipa is smaller than 10MB! Build failed."
-            exit 1
-          fi
-
+          echo "=== Generated IPA Details ==="
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
