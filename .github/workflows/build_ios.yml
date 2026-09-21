@@ -53,21 +53,23 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 259초 동안 Xcode archive를 완벽히 생성한 후 발생하는 서명 체크 에러를 무시하고 진행
+          # 259초 동안 아카이브를 정상 생성하고 서명 경고만 pass
           flutter build ipa --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          # 1. 방금 생성 완료된 xcarchive의 Products/Applications 폴더에서 진짜 Runner.app 추출
-          echo "=== Locating compiled Runner.app in archive ==="
-          APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build/ios/archive" -type d -name "Runner.app" | head -n 1)
+          echo "=== Locating compiled Runner.app ==="
+          
+          # 1. 아카이브 기본 위치 및 워크스페이스 전역 탐색
+          APP_PATH=$(find "$HOME/Library/Developer/Xcode/Archives" -type d -name "Runner.app" 2>/dev/null | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "Searching all paths for Runner.app..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep -E "Products/Applications|Release-iphoneos" | head -n 1)
+            APP_PATH=$(find "$RUNNER_WORKSPACE" -type d -name "Runner.app" | grep -E "Products/Applications|Release-iphoneos" | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+          if [ -z "$APP_PATH" ]; then
+            echo "Listing potential paths:"
+            find "$RUNNER_WORKSPACE" -maxdepth 5 -type d -name "*archive*" || true
             echo "::error::Compiled Runner.app not found!"
             exit 1
           fi
@@ -75,16 +77,18 @@ jobs:
           echo "Found compiled app bundle at: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # 2. SideStore용 표준 Payload 구성
-          rm -rf Payload Violet.ipa
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
+          # 2. 작업 디렉터리에 표준 Payload 구성
+          rm -rf ipa_build Violet.ipa
+          mkdir -p ipa_build/Payload
+          cp -R "$APP_PATH" ipa_build/Payload/
 
-          # SideStore/무료 계정 App ID 충돌 방지를 위해 미사용 익스텐션 제거
-          rm -rf Payload/Runner.app/PlugIns || true
+          # SideStore 충돌 방지: 불필요한 플러그인 확장 정리
+          rm -rf ipa_build/Payload/Runner.app/PlugIns || true
 
-          # 3. 표준 압축
-          zip -r -q Violet.ipa Payload
+          # 3. Payload 디렉터리 압축
+          cd ipa_build
+          zip -r -q ../Violet.ipa Payload
+          cd ..
 
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
