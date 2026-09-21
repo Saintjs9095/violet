@@ -37,48 +37,55 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile
+      - name: Clean Podfile and Inject Dummy Team
         working-directory: violet/ios
         run: |
+          # 1. ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
+
+          # 2. Flutter의 'Development Team' 누락 체크를 통과시키기 위해 pbxproj 및 xcconfig에 더미 팀 주입
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "XXXXXXXXXX";/g' Runner.xcodeproj/project.pbxproj
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "DEVELOPMENT_TEAM = XXXXXXXXXX" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
+          done
 
       - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          mkdir -p "$RUNNER_TEMP/build_out"
-          # Xcode 빌드 산출물 위치(SYMROOT)를 강제로 RUNNER_TEMP로 리다이렉트
-          flutter build ios --release --no-codesign -- \
-            SYMROOT="$RUNNER_TEMP/build_out" \
-            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/build_out/Release-iphoneos" || true
+          # 순수 flutter build 명령어로 380초간 정규 AOT 컴파일 수행 (팀 검증 통과)
+          flutter build ios --release --no-codesign
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in RUNNER_TEMP ==="
-          APP_PATH="$RUNNER_TEMP/build_out/Release-iphoneos/Runner.app"
+          echo "=== Locating compiled Runner.app ==="
+          APP_PATH=""
 
-          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching all folders in RUNNER_TEMP..."
-            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-          fi
+          for candidate in \
+            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
+            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
+            $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | head -n 1); do
+            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ] && [ -s "$candidate/Runner" ]; then
+              APP_PATH="$candidate"
+              break
+            fi
+          done
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching whole workspace as fallback..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
-          fi
-
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+          if [ -z "$APP_PATH" ]; then
             echo "::error::Compiled Runner.app not found!"
-            find "$RUNNER_TEMP" -maxdepth 4 || true
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
