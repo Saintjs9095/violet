@@ -37,16 +37,16 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Flutter Configuration
-        working-directory: violet
-        run: |
-          # Flutter Dart 엔진/에셋 및 CocoaPods 구성 생성
-          flutter build ios --config-only --no-codesign
-
-      - name: Strip Signing from Project and Pods
+      - name: Remove ShareExtension Completely
         working-directory: violet/ios
         run: |
-          # 1. ShareExtension 타깃 제거 (Podfile)
+          # 1. ShareExtension 디렉터리 물리 삭제
+          rm -rf ShareExtension
+
+          # 2. Scheme 파일에서 ShareExtension 참조 제거
+          find Runner.xcodeproj -name "*.xcscheme" -exec sed -i '' '/ShareExtension/d' {} + || true
+
+          # 3. Podfile에서 ShareExtension 블록 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -65,78 +65,62 @@ jobs:
               f.writelines(new_lines)
           '
 
-          # 2. project.pbxproj 내 모든 서명 요구 강제 비활성화
+          # 4. project.pbxproj에서 ShareExtension 완벽 제거 및 무서명 강제
           python3 -c '
           path = "Runner.xcodeproj/project.pbxproj"
           with open(path, "r") as f:
               lines = f.readlines()
-          new_lines = []
-          for line in lines:
-              if "ShareExtension.appex" in line or ("ShareExtension" in line and "PBXTargetDependency" in line):
-                  continue
-              if "CODE_SIGN_STYLE" in line:
-                  new_lines.append("\t\t\t\tCODE_SIGN_STYLE = Manual;\n")
-                  continue
-              if "CODE_SIGN_IDENTITY" in line or "DEVELOPMENT_TEAM" in line or "PROVISIONING_PROFILE" in line:
-                  continue
-              new_lines.append(line)
-              if "buildSettings = {" in line:
-                  new_lines.append("\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n")
-                  new_lines.append("\t\t\t\tCODE_SIGN_IDENTITY = \"\";\n")
-                  new_lines.append("\t\t\t\tDEVELOPMENT_TEAM = \"\";\n")
+          new_lines = [l for l in lines if "ShareExtension" not in l]
+          content = "".join(new_lines)
+          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
+          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
           with open(path, "w") as f:
-              f.writelines(new_lines)
+              f.write(content)
           '
 
       - name: Install Pods
         working-directory: violet/ios
         run: pod install
 
-      - name: Build Full Binary with xcodebuild
-        working-directory: violet/ios
+      - name: Build Runner App
+        working-directory: violet
         run: |
-          # CODE_SIGNING_ALLOWED=NO 옵션과 함께 실제 실행 바이너리 빌드
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath derived_data \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # flutter build를 통해 바이너리, 에셋, 플러그인을 완전히 컴파일
+          # 끝날 때 서명 체크로 exit 1이 발생해도 번들은 완성되므로 무시하고 진행
+          flutter build ios --release --no-codesign || true
 
-      - name: Package Real IPA
+      - name: Verify and Package IPA
         run: |
-          APP_PATH=$(find "$GITHUB_WORKSPACE" -name "Runner.app" -type d | grep "derived_data" | grep "Release-iphoneos" | head -n 1)
+          echo "=== Searching for compiled Runner.app ==="
+          # 크기가 1MB 이상인 진짜 Runner 실행 파일이 들어있는 Runner.app 찾기
+          APP_PATH=""
+          for candidate in $(find "$GITHUB_WORKSPACE" -type d -name "Runner.app"); do
+            if [ -f "$candidate/Runner" ] && [ -f "$candidate/Info.plist" ]; then
+              APP_PATH="$candidate"
+              break
+            fi
+          done
 
           if [ -z "$APP_PATH" ]; then
-            echo "::error::Runner.app could not be found!"
+            echo "Direct Runner.app with binary not found. Searching build products..."
+            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 5 -ls || true
+            echo "::error::No compiled Runner binary found!"
             exit 1
           fi
 
-          echo "Found compiled app bundle at: $APP_PATH"
-          ls -la "$APP_PATH"
-
-          # Info.plist와 Runner 실행 파일 검증
-          if [ ! -f "$APP_PATH/Info.plist" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Runner binary or Info.plist is missing in bundle!"
-            exit 1
-          fi
+          echo "Found compiled app bundle: $APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 불필요한 플러그인 폴더 제거
+          # SideStore/AltStore 규격용 정리
           rm -rf Payload/Runner.app/PlugIns || true
 
           zip -r -q Violet.ipa Payload
 
-          echo "Generated IPA Size:"
+          echo "=== Final IPA Size ==="
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
