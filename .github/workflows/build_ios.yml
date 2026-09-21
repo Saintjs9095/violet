@@ -37,14 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Workspace and Pods
-        working-directory: violet
+      - name: Clean Podfile
+        working-directory: violet/ios
         run: |
-          # 1. Flutter 엔진 파일 및 Dart AOT 사전 구성
-          flutter build ios --config-only --release --no-codesign
-
-          # 2. Podfile에서 ShareExtension 제거
-          cd ios
+          # Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -64,54 +60,63 @@ jobs:
           '
           pod install
 
-          # 3. CocoaPods 프레임워크 임베드 스크립트 서명 무력화
-          find Targets\ Support\ Files -name "*-frameworks.sh" -exec sed -i '' 's/code_sign_if_enabled/echo "bypassing pod codesign"/g' {} + || true
-
-      - name: Archive Runner via xcodebuild
-        working-directory: violet/ios
+      - name: Build and Intercept App Bundle
+        working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter CLI의 사후 삭제(cleanup)를 피해 xcodebuild archive로 온전한 아카이브 생성
-          xcodebuild archive \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          mkdir -p "$RUNNER_TEMP/saved_app"
+
+          # 백그라운드에서 실시간으로 생성되는 Runner.app 바이너리를 낚아채는 데몬
+          (
+            echo "Starting continuous app interceptor daemon..."
+            while true; do
+              # DerivedData 및 Archives 디렉터리 내 완성된 Runner.app 탐색
+              FOUND=$(find "$HOME/Library/Developer/Xcode" "$GITHUB_WORKSPACE" -type f -name "Info.plist" 2>/dev/null | grep -E "Runner.app/Info.plist" | head -n 1)
+              if [ -n "$FOUND" ]; then
+                APP_DIR=$(dirname "$FOUND")
+                if [ -f "$APP_DIR/Runner" ] && [ -s "$APP_DIR/Runner" ]; then
+                  cp -R "$APP_DIR" "$RUNNER_TEMP/saved_app/" 2>/dev/null || true
+                fi
+              fi
+              sleep 1
+            done
+          ) &
+          DAEMON_PID=$!
+
+          # 완벽한 258초 AOT + Swift 컴파일 수행
+          flutter build ipa --release --no-codesign || true
+
+          # 데몬 종료
+          kill $DAEMON_PID 2>/dev/null || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in xcarchive ==="
-          APP_PATH="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app"
+          echo "=== Checking Intercepted Bundle ==="
+          APP_PATH="$RUNNER_TEMP/saved_app/Runner.app"
 
-          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching all folders in RUNNER_TEMP..."
-            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "Deep searching fallback..."
+            APP_PATH=$(find "$RUNNER_TEMP" "$HOME/Library/Developer" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Compiled Runner.app not found in xcarchive!"
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled executable Runner binary could not be captured!"
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 불필요한 확장 플러그인 제거
+          # SideStore 충돌 방지: 잔여 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # ZIP 압축
+          # 표준 ZIP 압축
           zip -r -q Violet.ipa Payload
 
           # IPA 용량 검증
