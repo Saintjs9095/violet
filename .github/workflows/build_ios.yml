@@ -40,13 +40,12 @@ jobs:
       - name: Pre-build Flutter Frameworks
         working-directory: violet
         run: |
-          # Flutter가 Runner에 필요한 App.framework 및 Flutter.framework를 빌드하도록 유도
           flutter build ios --config-only --no-codesign
 
-      - name: Prepare Pods and Disable All Codesigning
+      - name: Configure Scheme and Remove ShareExtension
         working-directory: violet/ios
         run: |
-          # 1. ShareExtension을 Podfile 및 프로젝트에서 완전 배제
+          # 1. Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -66,7 +65,29 @@ jobs:
           '
           pod install
 
-          # 2. Release.xcconfig 및 Generated.xcconfig에 강제 무서명 설정
+          # 2. Runner Scheme 파일에서 ShareExtension 빌드 엔트리 XML 삭제
+          python3 -c '
+          import os, glob
+          import xml.etree.ElementTree as ET
+
+          schemes = glob.glob("**/*.xcscheme", recursive=True)
+          for s in schemes:
+              try:
+                  tree = ET.parse(s)
+                  root = tree.getroot()
+                  for build_action_entry in root.findall(".//BuildActionEntry"):
+                      for ref in build_action_entry.findall("BuildableReference"):
+                          if "ShareExtension" in ref.attrib.get("BlueprintName", ""):
+                              parent = root.find(".//BuildActionEntries")
+                              if parent is not None:
+                                  parent.remove(build_action_entry)
+                  tree.write(s)
+                  print("Patched scheme:", s)
+              except Exception as e:
+                  print("Skip:", s, e)
+          '
+
+          # 3. Release 및 Generated 설정에 무서명 오버라이드
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
             echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
             echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
@@ -78,10 +99,9 @@ jobs:
       - name: Build Runner App with xcodebuild
         working-directory: violet/ios
         run: |
-          # Scheme 대신 Runner 프로젝트의 Runner 타깃만 단독 빌드 (-target Runner)
           xcodebuild build \
-            -project Runner.xcodeproj \
-            -target Runner \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath ../build_output \
@@ -94,16 +114,15 @@ jobs:
 
       - name: Package Payload into IPA
         run: |
-          # 빌드된 Runner.app 실제 위치 확인
           APP_PATH=$(find violet/build_output -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "Runner.app not found under build_output, checking all paths..."
+            echo "Runner.app not found under build_output, searching elsewhere..."
             APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Built app bundle was not found or invalid!"
+            echo "::error::Compiled Runner.app not found!"
             exit 1
           fi
 
@@ -114,7 +133,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore/AltStore 규격용 정리
+          # SideStore/AltStore 충돌 방지: 잔여 확장 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           zip -r -q Violet.ipa Payload
