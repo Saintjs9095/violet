@@ -37,9 +37,14 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Remove ShareExtension from Podfile
-        working-directory: violet/ios
+      - name: Prepare Workspace and Pods
+        working-directory: violet
         run: |
+          # 1. Flutter 엔진 파일 및 Dart AOT 사전 구성
+          flutter build ios --config-only --release --no-codesign
+
+          # 2. Podfile에서 ShareExtension 제거
+          cd ios
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -59,30 +64,39 @@ jobs:
           '
           pod install
 
-      - name: Build Unsigned iOS Archive via Flutter
-        working-directory: violet
+          # 3. CocoaPods 프레임워크 임베드 스크립트 서명 무력화
+          find Targets\ Support\ Files -name "*-frameworks.sh" -exec sed -i '' 's/code_sign_if_enabled/echo "bypassing pod codesign"/g' {} + || true
+
+      - name: Archive Runner via xcodebuild
+        working-directory: violet/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 258초간 실제 기계어 컴파일 및 아카이브 생성을 완주하고,
-          # 마지막 단계의 개발자 팀 서명 유효성 체크 실패(exit 1)를 넘겨 아카이브를 보존합니다.
-          flutter build ipa --release --no-codesign || true
+          # Flutter CLI의 사후 삭제(cleanup)를 피해 xcodebuild archive로 온전한 아카이브 생성
+          xcodebuild archive \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in xcarchive or build outputs ==="
-          
-          # Xcode가 생성한 .xcarchive 내부의 실제 Runner.app 우선 탐색
-          APP_PATH=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/Archives" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications|archive" | head -n 1)
+          echo "=== Locating compiled Runner.app in xcarchive ==="
+          APP_PATH="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app"
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching all candidate locations..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Searching all folders in RUNNER_TEMP..."
+            APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "::error::Compiled Runner.app could not be found!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+            echo "::error::Compiled Runner.app not found in xcarchive!"
             exit 1
           fi
 
@@ -94,13 +108,13 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # SideStore 충돌 방지: 불필요한 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # 최종 IPA 용량 검증
+          # IPA 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
