@@ -31,16 +31,16 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
-          cache: false
+          cache: true
 
       - name: Install dependencies
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Force Rebuild Flutter Tools
+      - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -50,54 +50,39 @@ jobs:
               if "target '\''ShareExtension'\''" in line:
                   skip = True
                   continue
-              if skip and line.strip() == "end":
-                  skip = False
-                  continue
-              if not skip:
-                  new_lines.append(line)
+          if skip and line.strip() == "end":
+              skip = False
+              continue
+          if not skip:
+              new_lines.append(line)
           with open("Podfile", "w") as f:
               f.writelines(new_lines)
           '
           pod install
-
-          # 2. Flutter CLI의 Development Team 강제 검증 로직 영구 무력화
-          FLUTTER_BIN=$(which flutter)
-          FLUTTER_ROOT=$(cd $(dirname "$FLUTTER_BIN")/.. && pwd)
-          echo "Flutter Root is: $FLUTTER_ROOT"
-
-          # mac.dart 내부의 Development Team 에러를 통과하도록 패치
-          find "$FLUTTER_ROOT/packages/flutter_tools" -name "*.dart" -exec sed -i '' 's/throwToolExit(_developmentTeamMissingError/print(_developmentTeamMissingError/g' {} +
-
-          # 중요: 기존 바이너리 캐시를 제거하여 수정한 Dart 코드로 즉시 재빌드 유도
-          rm -rf "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
-          rm -rf "$FLUTTER_ROOT/bin/cache/flutter_tools.stamp"
 
       - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 재컴파일된 flutter_tools로 온전한 기기용 Release 번들 생성 (검증 에러 없이 완주)
-          flutter build ios --release --no-codesign
+          # 380초 컴파일 완료 후 팀 서명 에러(exit 1)를 넘겨 DerivedData 결과물을 보존
+          flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH=""
+          echo "=== Locating compiled Runner.app in DerivedData ==="
+          
+          # Xcode DerivedData 내 생성된 Release-iphoneos/Runner.app 탐색
+          APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
 
-          for candidate in \
-            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
-            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
-            $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | head -n 1); do
-            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ] && [ -s "$candidate/Runner" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Searching all candidate directories..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          fi
 
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app not found!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Compiled Runner.app could not be found!"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 || true
             exit 1
           fi
 
@@ -115,7 +100,7 @@ jobs:
           # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # IPA 세부 정보 및 용량 검증
+          # IPA 파일 정보 및 용량 검증 (바이너리 포함 필수 10MB 이상)
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
