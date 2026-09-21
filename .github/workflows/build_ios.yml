@@ -37,90 +37,56 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Remove ShareExtension Completely
-        working-directory: violet/ios
-        run: |
-          # 1. ShareExtension 디렉터리 물리 삭제
-          rm -rf ShareExtension
-
-          # 2. Scheme 파일에서 ShareExtension 참조 제거
-          find Runner.xcodeproj -name "*.xcscheme" -exec sed -i '' '/ShareExtension/d' {} + || true
-
-          # 3. Podfile에서 ShareExtension 블록 제거
-          python3 -c '
-          with open("Podfile", "r") as f:
-              lines = f.readlines()
-          new_lines = []
-          skip = False
-          for line in lines:
-              if "target '\''ShareExtension'\''" in line:
-                  skip = True
-                  continue
-              if skip and line.strip() == "end":
-                  skip = False
-                  continue
-              if not skip:
-                  new_lines.append(line)
-          with open("Podfile", "w") as f:
-              f.writelines(new_lines)
-          '
-
-          # 4. project.pbxproj에서 ShareExtension 완벽 제거 및 무서명 강제
-          python3 -c '
-          path = "Runner.xcodeproj/project.pbxproj"
-          with open(path, "r") as f:
-              lines = f.readlines()
-          new_lines = [l for l in lines if "ShareExtension" not in l]
-          content = "".join(new_lines)
-          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"\";")
-          with open(path, "w") as f:
-              f.write(content)
-          '
-
-      - name: Install Pods
-        working-directory: violet/ios
-        run: pod install
-
-      - name: Build Runner App
+      - name: Build Runner IPA
         working-directory: violet
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # flutter build를 통해 바이너리, 에셋, 플러그인을 완전히 컴파일
-          # 끝날 때 서명 체크로 exit 1이 발생해도 번들은 완성되므로 무시하고 진행
+          # Flutter 자체 빌드 파이프라인을 통해 정규 바이너리 및 프레임워크를 온전히 빌드
           flutter build ios --release --no-codesign || true
 
-      - name: Verify and Package IPA
+          # DerivedData 및 build 디렉터리 내 완성된 번들 탐색
+          APP_DIR=$(find build/ios -name "Runner.app" -type d | head -n 1)
+          if [ -z "$APP_DIR" ]; then
+            APP_DIR=$(find . -name "Runner.app" -type d | head -n 1)
+          fi
+
+          echo "Found app at: $APP_DIR"
+
+          # 빌드 완료된 번들을 xcodebuild로 직접 ad-hoc 아카이빙/패키징
+          cd ios
+          xcodebuild -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ../build_output \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package Payload into IPA
         run: |
-          echo "=== Searching for compiled Runner.app ==="
-          # 크기가 1MB 이상인 진짜 Runner 실행 파일이 들어있는 Runner.app 찾기
-          APP_PATH=""
-          for candidate in $(find "$GITHUB_WORKSPACE" -type d -name "Runner.app"); do
-            if [ -f "$candidate/Runner" ] && [ -f "$candidate/Info.plist" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
+          APP_PATH=$(find violet/build_output -name "Runner.app" -type d | grep "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "Direct Runner.app with binary not found. Searching build products..."
-            find "$GITHUB_WORKSPACE/violet/build" -maxdepth 5 -ls || true
-            echo "::error::No compiled Runner binary found!"
+            echo "::error::Runner.app could not be found!"
             exit 1
           fi
 
-          echo "Found compiled app bundle: $APP_PATH"
+          echo "Using compiled bundle: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore/AltStore 규격용 정리
+          # SideStore 충돌 방지: 불필요한 플러그인 확장 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           zip -r -q Violet.ipa Payload
 
-          echo "=== Final IPA Size ==="
+          echo "=== Final IPA File ==="
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
