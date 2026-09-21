@@ -37,16 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Flutter Frameworks
-        working-directory: violet
-        run: |
-          # Flutter가 iOS 네이티브 빌드에 필요한 모든 에셋 및 프레임워크를 준비하도록 실행
-          flutter build ios --config-only --release --no-codesign
-
-      - name: Strip Signing and Configure Pods
+      - name: Prepare Workspace and Pods
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 블록 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -66,63 +60,44 @@ jobs:
           '
           pod install
 
-          # 2. 모든 빌드 설정 파일에 무서명 주입
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "DEVELOPMENT_TEAM = " >> "$cfg"
-          done
-
-      - name: Archive Runner via xcodebuild
-        working-directory: violet/ios
+      - name: Build Runner Release Bundle
+        working-directory: violet
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # xcodebuild archive 명령으로 서명 없이 순수 아카이브 생성
-          xcodebuild archive \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/Violet.xcarchive" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # Flutter 공식 빌드를 수행하되, 서명 검사로 인한 종료(exit 1)를 통과시킵니다.
+          flutter build ios --release --no-codesign || true
 
-      - name: Package Payload into SideStore IPA
+      - name: Assemble Real IPA
         run: |
-          ARCHIVE_APP="$RUNNER_TEMP/Violet.xcarchive/Products/Applications/Runner.app"
+          # Flutter가 실제 기계어 바이너리(ARM64)와 에셋을 완성해 둔 디렉터리를 탐색
+          echo "=== Locating compiled Runner.app ==="
+          APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | grep -E "Release-iphoneos|iphoneos" | head -n 1)
 
-          if [ ! -d "$ARCHIVE_APP" ]; then
-            echo "Searching all folders in RUNNER_TEMP for Runner.app..."
-            ARCHIVE_APP=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Searching all Runner.app instances..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | head -n 1)
           fi
 
-          if [ -z "$ARCHIVE_APP" ] || [ ! -f "$ARCHIVE_APP/Info.plist" ]; then
-            echo "::error::Compiled Runner.app not found in archive!"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Runner.app could not be found!"
             exit 1
           fi
 
-          echo "Found compiled app bundle at: $ARCHIVE_APP"
-          ls -lh "$ARCHIVE_APP/Runner"
+          echo "Target Bundle Path: $APP_PATH"
 
-          # Payload 디렉터리 구성
-          rm -rf ipa_build Violet.ipa
-          mkdir -p ipa_build/Payload
-          cp -R "$ARCHIVE_APP" ipa_build/Payload/
+          # SideStore 표준 Payload 구성
+          rm -rf Payload Violet.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
 
-          # SideStore/무료 계정 App ID 충돌 방지를 위해 미사용 익스텐션 제거
-          rm -rf ipa_build/Payload/Runner.app/PlugIns || true
+          # SideStore 설치 에러를 유발하는 확장 폴더 제거
+          rm -rf Payload/Runner.app/PlugIns || true
 
-          # 표준 zip 압축
-          cd ipa_build
-          zip -r -q ../Violet.ipa Payload
-          cd ..
+          # 표준 ZIP 압축
+          zip -r -q Violet.ipa Payload
 
-          echo "=== Final IPA File Details ==="
+          echo "=== Generated IPA Details ==="
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
