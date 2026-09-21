@@ -37,12 +37,12 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Setup Mock Codesign
-        working-directory: violet/ios
+      - name: Patch Xcode Script to Bypass Codesign
+        working-directory: violet
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 제거
+          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
-          with open("Podfile", "r") as f:
+          with open("ios/Podfile", "r") as f:
               lines = f.readlines()
           new_lines = []
           skip = False
@@ -55,28 +55,24 @@ jobs:
                   continue
               if not skip:
                   new_lines.append(line)
-          with open("Podfile", "w") as f:
+          with open("ios/Podfile", "w") as f:
               f.writelines(new_lines)
           '
-          pod install
+          cd ios && pod install && cd ..
 
-          # 2. CI 상에서 PhaseScriptExecution의 codesign 실패를 원천 방지하는 Mock 바이너리 생성
-          mkdir -p "$RUNNER_TEMP/fake_bin"
-          cat << 'EOF' > "$RUNNER_TEMP/fake_bin/codesign"
-          #!/bin/bash
-          # Flutter/Xcode 서명 호출 시 항상 성공으로 속여 번들 빌드를 완주
-          exit 0
-          EOF
-          chmod +x "$RUNNER_TEMP/fake_bin/codesign"
+          # 2. Flutter의 xcode_backend.sh 스크립트 내 하드코딩된 codesign 명령을 전부 exit 0(참)으로 패치
+          FLUTTER_ROOT=$(flutter doctor -v | grep "Flutter version" | sed -E 's/.* at (.*)/\1/')
+          BACKEND_SCRIPT="$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh"
+          echo "Patching Flutter backend script at $BACKEND_SCRIPT"
+          sed -i '' 's/codesign --force --verbose/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
+          sed -i '' 's/codesign --force/echo "bypassing codesign" #/g' "$BACKEND_SCRIPT"
 
       - name: Build Runner App via xcodebuild
         working-directory: violet/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # fake codesign을 PATH 최우선순위로 적용하여 PhaseScriptExecution 통과
-          export PATH="$RUNNER_TEMP/fake_bin:$PATH"
-
+          # codesign 호출이 무력화되었으므로 xcodebuild가 에러 없이 바이너리를 끝까지 빌드합니다.
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -96,13 +92,12 @@ jobs:
           APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" | grep -E "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching whole RUNNER_TEMP for Runner.app..."
+            echo "Searching fallback..."
             APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
             echo "::error::Compiled Runner.app not found!"
-            find "$RUNNER_TEMP" -maxdepth 4 || true
             exit 1
           fi
 
@@ -114,7 +109,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 폴더 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
