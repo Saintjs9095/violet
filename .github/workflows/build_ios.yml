@@ -37,10 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Override Codesign Binary
+      - name: Clean Podfile and Setup Mock Codesign
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 정리
+          # 1. Podfile에서 ShareExtension 타깃 안전하게 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -50,17 +50,17 @@ jobs:
               if "target '\''ShareExtension'\''" in line:
                   skip = True
                   continue
-          if skip and line.strip() == "end":
-              skip = False
-              continue
-          if not skip:
-              new_lines.append(line)
-      with open("Podfile", "w") as f:
-          f.writelines(new_lines)
+              if skip and line.strip() == "end":
+                  skip = False
+                  continue
+              if not skip:
+                  new_lines.append(line)
+          with open("Podfile", "w") as f:
+              f.writelines(new_lines)
           '
           pod install
 
-          # 2. 모든 빌드 페이즈 스크립트의 codesign 호출을 무조건 통과시키는 전역 래퍼 생성
+          # 2. PhaseScriptExecution 내부의 codesign 호출 통과를 위한 더미 스크립트 등록
           sudo mkdir -p /usr/local/bin
           sudo tee /usr/local/bin/codesign > /dev/null << 'EOF'
           #!/bin/bash
@@ -73,7 +73,7 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # /usr/local/bin을 최상단에 두어 모든 빌드 페이즈가 더미 서명을 바라보게 설정
+          # 더미 codesign을 우선 호출하도록 PATH 최우선순위 부여
           export PATH="/usr/local/bin:$PATH"
 
           xcodebuild build \
@@ -95,7 +95,7 @@ jobs:
           APP_PATH=$(find "$RUNNER_TEMP/xcode_output" -type d -name "Runner.app" | grep -E "Release-iphoneos" | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching whole RUNNER_TEMP for Runner.app..."
+            echo "Searching fallback..."
             APP_PATH=$(find "$RUNNER_TEMP" -type d -name "Runner.app" | head -n 1)
           fi
 
@@ -113,10 +113,10 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 충돌 방지용 플러그인 폴더 제거
+          # 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # 압축
+          # 표준 압축
           zip -r -q Violet.ipa Payload
 
           echo "=== Final IPA File Details ==="
