@@ -37,9 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Remove ShareExtension from Podfile
+      - name: Remove ShareExtension and Configure Pods
         working-directory: violet/ios
         run: |
+          # 1. Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -59,34 +60,42 @@ jobs:
           '
           pod install
 
-      - name: Build Flutter iOS Release
+      - name: Build Runner Binary via Xcode
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # DerivedData 경로를 명시하여 컴파일된 바이너리가 사라지지 않게 보존
-          # 서명 검증 실패(exit 1)는 정상 산출물이 나온 후 발생하므로 통과시킵니다.
-          flutter build ios --release --no-codesign --extra-gen-snapshot-options=--save-debugging-info || true
+          # Flutter 사전 구성
+          flutter build ios --config-only --release --no-codesign
+
+          # CocoaPods의 모든 타깃 및 Runner에 무서명 빌드 강제
+          cd ios
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ../build_output \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Assemble Real IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          # 빌드 완료된 실제 바이너리가 들어있는 Runner.app 탐색
-          APP_PATH=""
-          for candidate in $(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null); do
-            if [ -f "$candidate/Runner" ] && [ -f "$candidate/Info.plist" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
+          APP_PATH=$(find violet/build_output -type d -name "Runner.app" | grep "Release-iphoneos" | head -n 1)
 
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app with executable binary not found!"
-            find "$GITHUB_WORKSPACE" -maxdepth 5 -ls || true
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Compiled Runner.app not found under build_output!"
+            find violet/build_output -name "Runner*" || true
             exit 1
           fi
 
-          echo "Using valid bundle at: $APP_PATH"
+          echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
@@ -94,13 +103,13 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore/무료 계정 충돌 방지: 익스텐션 제거
+          # SideStore와 충돌하는 익스텐션 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # 표준 압축
+          # ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # IPA 용량 검증 (10MB 이상)
+          # 용량 검증 (10MB 이상 필수)
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
           echo "Final IPA Size: $IPA_SIZE bytes"
 
