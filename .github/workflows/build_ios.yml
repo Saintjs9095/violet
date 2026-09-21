@@ -37,10 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Disable Script Codesigning
+      - name: Clean Podfile and Setup Mock Codesign
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 타깃 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,23 +60,23 @@ jobs:
           '
           pod install
 
-          # 2. PhaseScriptExecution 서명 크래시 방지용 xcconfig 주입
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "DEVELOPMENT_TEAM = " >> "$cfg"
-          done
+          # 2. CI 상에서 PhaseScriptExecution의 codesign 실패를 원천 방지하는 Mock 바이너리 생성
+          mkdir -p "$RUNNER_TEMP/fake_bin"
+          cat << 'EOF' > "$RUNNER_TEMP/fake_bin/codesign"
+          #!/bin/bash
+          # Flutter/Xcode 서명 호출 시 항상 성공으로 속여 번들 빌드를 완주
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fake_bin/codesign"
 
       - name: Build Runner App via xcodebuild
         working-directory: violet/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
-          EXPANDED_CODE_SIGN_IDENTITY: ""
-          CODE_SIGNING_ALLOWED: "NO"
         run: |
-          # PhaseScriptExecution 내 codesign 호출을 무력화하며 정식 arm64 번들 생성
+          # fake codesign을 PATH 최우선순위로 적용하여 PhaseScriptExecution 통과
+          export PATH="$RUNNER_TEMP/fake_bin:$PATH"
+
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -102,6 +102,7 @@ jobs:
 
           if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
             echo "::error::Compiled Runner.app not found!"
+            find "$RUNNER_TEMP" -maxdepth 4 || true
             exit 1
           fi
 
@@ -113,7 +114,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
@@ -123,7 +124,7 @@ jobs:
           ls -lh Violet.ipa
 
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
-          echo "Final IPA Size: $IPA_SIZE bytes"
+          echo "Final IPA Size in bytes: $IPA_SIZE"
 
           if [ "$IPA_SIZE" -lt 10000000 ]; then
             echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
