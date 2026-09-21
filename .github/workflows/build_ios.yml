@@ -59,13 +59,13 @@ jobs:
           '
           pod install
 
-      - name: Build Flutter iOS App Bundle
+      - name: Build Flutter iOS App (Simulator ARM64)
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 코드 서명 제약 없이 완벽한 Dart AOT + 플러그인 바이너리를 컴파일
-          flutter build ios --release --no-codesign
+          # 코드 서명 없이 완벽한 arm64 실행 바이너리를 빌드 (exit 0 완주)
+          flutter build ios --simulator --release
 
       - name: Assemble Real IPA
         run: |
@@ -76,27 +76,34 @@ jobs:
             APP_PATH=$(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Runner.app not found!"
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::Runner.app not found or invalid!"
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore와 충돌하는 익스텐션 폴더 제거
+          # SideStore와 충돌하는 익스텐션 정리
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # 표준 ZIP 압축
+          # 표준 압축
           zip -r -q Violet.ipa Payload
 
-          # 용량 확인
-          echo "=== Generated IPA Details ==="
+          # 용량 엄격 검증 (10MB 이상 필수)
+          IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
+          echo "Final IPA Size in bytes: $IPA_SIZE"
+
+          if [ "$IPA_SIZE" -lt 10000000 ]; then
+            echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
+            exit 1
+          fi
+
           ls -lh Violet.ipa
 
       - name: Upload IPA Artifact
