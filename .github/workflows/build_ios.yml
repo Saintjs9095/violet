@@ -37,10 +37,10 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Patch Xcode Project for Ad-Hoc Signing
+      - name: Completely Remove ShareExtension from Xcode Project
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 제거
+          # 1. Podfile에서 ShareExtension 제거
           python3 -c '
           with open("Podfile", "r") as f:
               lines = f.readlines()
@@ -60,48 +60,45 @@ jobs:
           '
           pod install
 
-          # 2. project.pbxproj 내 모든 코드 서명 설정을 Ad-Hoc(-)으로 강제 패치
+          # 2. project.pbxproj에서 ShareExtension 타깃 참조 및 의존성을 완전히 제거하고 Ad-Hoc 서명 주입
           python3 -c '
-          proj_path = "Runner.xcodeproj/project.pbxproj"
-          with open(proj_path, "r") as f:
-              content = f.read()
-          content = content.replace("CODE_SIGN_IDENTITY = \"iPhone Developer\";", "CODE_SIGN_IDENTITY = \"-\";")
-          content = content.replace("CODE_SIGN_IDENTITY = \"Apple Development\";", "CODE_SIGN_IDENTITY = \"-\";")
-          content = content.replace("CODE_SIGN_STYLE = Automatic;", "CODE_SIGN_STYLE = Manual;")
-          content = content.replace("DevelopmentTeam = \"\";", "DevelopmentTeam = \"-\";")
-          with open(proj_path, "w") as f:
-              f.write(content)
-          print("Successfully patched project.pbxproj to Ad-Hoc signing")
+          import re
+          path = "Runner.xcodeproj/project.pbxproj"
+          with open(path, "r") as f:
+              data = f.read()
+
+          # ShareExtension 관련 타깃 의존성 라인 제거
+          data = re.sub(r".*ShareExtension.*", "", data)
+
+          # 서명 설정을 Ad-Hoc(-)으로 강제 통일
+          data = re.sub(r"CODE_SIGN_IDENTITY = [^;]+;", "CODE_SIGN_IDENTITY = \"-\";", data)
+          data = re.sub(r"CODE_SIGN_STYLE = [^;]+;", "CODE_SIGN_STYLE = Manual;", data)
+          data = re.sub(r"DEVELOPMENT_TEAM = [^;]+;", "DEVELOPMENT_TEAM = \"\";", data)
+          
+          with open(path, "w") as f:
+              f.write(data)
+          print("PBXPROJ successfully cleaned of ShareExtension and patched to Ad-Hoc!")
           '
 
-          # 3. xcconfig에 Ad-Hoc 서명 플래그 추가
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "CODE_SIGN_STYLE = Manual" >> "$cfg"
-            echo "DEVELOPMENT_TEAM = " >> "$cfg"
-            echo "PROVISIONING_PROFILE_SPECIFIER = " >> "$cfg"
-          done
-
-      - name: Build Flutter iOS App Bundle
+      - name: Build Runner iOS App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Ad-Hoc 서명 설정이 적용된 상태로 공식 빌드 수행
+          # ShareExtension이 완전히 제거된 상태이므로 오직 Runner 메인 앱만 빌드됩니다.
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Searching for compiled Runner.app ==="
+          echo "=== Locating compiled Runner.app ==="
           APP_PATH=""
 
-          # 1. Flutter 빌드 기본 산출물 경로 우선 검색
+          # Runner.app 탐색
           for candidate in \
             "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
             "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
-            $(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1) \
-            $(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1); do
+            $(find "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1) \
+            $(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1); do
             if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
               APP_PATH="$candidate"
               break
@@ -115,20 +112,20 @@ jobs:
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 설치 시 충돌하는 잔여 확장 폴더 정리
+          # 잔여 익스텐션 디렉터리 정리
           rm -rf Payload/Runner.app/PlugIns || true
 
           # 표준 ZIP 압축
           zip -r -q Violet.ipa Payload
 
-          # 용량 확인 (바이너리 포함 여부)
+          # 최종 IPA 용량 검증
           echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
 
