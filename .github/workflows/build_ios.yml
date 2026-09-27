@@ -37,50 +37,59 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Prepare Pods
+      - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 제거
+          # Podfile에서 ShareExtension 타깃 블록 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-      - name: Build Flutter Dependencies
+      - name: Compile and Capture Runner App
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter Dart AOT 및 플러그인 에셋 사전 빌드
-          flutter build ios --config-only --release --no-codesign
+          mkdir -p "$RUNNER_TEMP/saved_app"
 
-      - name: Compile Runner Binary with Xcode
-        working-directory: violet/ios
-        env:
-          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
-        run: |
-          # 오직 Runner(메인 앱) 스킴만 릴리즈 기계어로 직접 컴파일
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+          # 백그라운드 데몬: Runner 바이너리가 디스크에 생성되는 순간 격리 디렉터리로 실시간 동기화
+          (
+            echo "Starting binary capture daemon..."
+            while true; do
+              # DerivedData 및 build 폴더 내 생성된 Runner 바이너리 감시
+              FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$GITHUB_WORKSPACE/violet/build" -type f -name "Runner" 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
+              if [ -n "$FOUND_BIN" ] && [ -s "$FOUND_BIN" ]; then
+                APP_DIR=$(dirname "$FOUND_BIN")
+                # 바이너리와 리소스가 기록되는 즉시 임시 보존 폴더로 미러링
+                rsync -a "$APP_DIR/" "$RUNNER_TEMP/saved_app/Runner.app/" 2>/dev/null || true
+              fi
+              sleep 0.2
+            done
+          ) &
+          DAEMON_PID=$!
+
+          # 380초간 C++, Rust, Swift, Dart 전체 완벽 컴파일 실행
+          flutter build ios --release --no-codesign || true
+
+          # 감시 데몬 종료
+          kill $DAEMON_PID 2>/dev/null || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
-          APP_PATH=$(find "$RUNNER_TEMP/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          echo "=== Inspecting Saved App Bundle ==="
+          APP_PATH="$RUNNER_TEMP/saved_app/Runner.app"
 
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "Searching all DerivedData fallback..."
-            APP_PATH=$(find "$RUNNER_TEMP/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          # 보존 폴더에 바이너리가 없으면 전체 워크스페이스에서 릴리즈 바이너리 재탐색
+          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
+            echo "Searching system fallbacks..."
+            FALLBACK=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
+            if [ -n "$FALLBACK" ]; then
+              APP_PATH=$(dirname "$FALLBACK")
+            fi
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app not found!"
-            find "$RUNNER_TEMP" -maxdepth 5 || true
+          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled Runner binary could not be captured!"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 || true
             exit 1
           fi
 
@@ -92,7 +101,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 플러그인 확장 폴더 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
