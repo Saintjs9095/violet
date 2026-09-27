@@ -37,71 +37,73 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile
+      - name: Clean Podfile and Setup Team Bypass
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 타깃 블록 제거
+          # 1. ShareExtension 타깃 블록 완전 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-      - name: Compile and Capture Runner App
+          # 2. Xcode 프로젝트 전체에 더미 Team ID 주입 (Flutter의 Missing Development Team 에러 원천 차단)
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "ABCD1234EF";/g' Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' Runner.xcodeproj/project.pbxproj
+
+          # 3. xcconfig 파일에도 동일하게 수동 서명 및 더미 팀 주입
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "DEVELOPMENT_TEAM = ABCD1234EF" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
+          done
+
+      - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          mkdir -p "$RUNNER_TEMP/saved_app"
-
-          # 백그라운드 데몬: Runner 바이너리가 디스크에 생성되는 순간 격리 디렉터리로 실시간 동기화
-          (
-            echo "Starting binary capture daemon..."
-            while true; do
-              # DerivedData 및 build 폴더 내 생성된 Runner 바이너리 감시
-              FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$GITHUB_WORKSPACE/violet/build" -type f -name "Runner" 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
-              if [ -n "$FOUND_BIN" ] && [ -s "$FOUND_BIN" ]; then
-                APP_DIR=$(dirname "$FOUND_BIN")
-                # 바이너리와 리소스가 기록되는 즉시 임시 보존 폴더로 미러링
-                rsync -a "$APP_DIR/" "$RUNNER_TEMP/saved_app/Runner.app/" 2>/dev/null || true
-              fi
-              sleep 0.2
-            done
-          ) &
-          DAEMON_PID=$!
-
-          # 380초간 C++, Rust, Swift, Dart 전체 완벽 컴파일 실행
-          flutter build ios --release --no-codesign || true
-
-          # 감시 데몬 종료
-          kill $DAEMON_PID 2>/dev/null || true
+          # 팀 검증을 통과하여 파일 정리(purge) 없이 exit 0 완주
+          flutter build ios --release --no-codesign
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Inspecting Saved App Bundle ==="
-          APP_PATH="$RUNNER_TEMP/saved_app/Runner.app"
+          echo "=== Locating compiled Runner.app ==="
+          
+          # 1. Flutter 표준 빌드 산출 경로 탐색
+          APP_PATH=""
+          for candidate in \
+            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
+            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
+            $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1); do
+            if [ -d "$candidate" ] && [ -f "$candidate/Runner" ]; then
+              APP_PATH="$candidate"
+              break
+            fi
+          done
 
-          # 보존 폴더에 바이너리가 없으면 전체 워크스페이스에서 릴리즈 바이너리 재탐색
-          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
-            echo "Searching system fallbacks..."
-            FALLBACK=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
-            if [ -n "$FALLBACK" ]; then
-              APP_PATH=$(dirname "$FALLBACK")
+          # 2. 탐색 폴백: 시스템 내 실존하는 바이너리가 든 Runner.app 탐색
+          if [ -z "$APP_PATH" ]; then
+            echo "Deep searching runner app containing binary..."
+            APP_PATH=$(find /Users/runner -type f -name "Runner" -perm +111 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
+            if [ -n "$APP_PATH" ]; then
+              APP_PATH=$(dirname "$APP_PATH")
             fi
           fi
 
-          if [ ! -d "$APP_PATH" ] || [ ! -s "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled Runner binary could not be captured!"
-            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 || true
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled executable Runner binary was not found!"
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
+          echo "Found Valid App Bundle: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # 잔여 플러그인 확장 폴더 정리
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
