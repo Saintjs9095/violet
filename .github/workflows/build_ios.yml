@@ -37,67 +37,62 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Configure Project for Unsigned Build
+      - name: Prepare Pods
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Xcode 프로젝트에서 ShareExtension 참조 완전히 제거
-          sed -i '' '/ShareExtension/d' Runner.xcodeproj/project.pbxproj || true
-
-          # 3. Xcode 프로젝트 전체에 서명 면제 및 더미 팀 주입 (Flutter의 뒷정리 삭제 로직 방지)
-          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "1234567890";/g' Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' Runner.xcodeproj/project.pbxproj
-
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "DEVELOPMENT_TEAM = 1234567890" >> "$cfg"
-          done
-
-      - name: Build Flutter iOS App Bundle
+      - name: Build Flutter Dependencies
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 불필요한 인자 없이 380초간 정규 AOT 컴파일 수행
-          flutter build ios --release --no-codesign || true
+          # Flutter Dart AOT 및 플러그인 에셋 사전 빌드
+          flutter build ios --config-only --release --no-codesign
+
+      - name: Compile Runner Binary with Xcode
+        working-directory: violet/ios
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+        run: |
+          # 오직 Runner(메인 앱) 스킴만 릴리즈 기계어로 직접 컴파일
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Runner.app ==="
-          APP_PATH=""
+          APP_PATH=$(find "$RUNNER_TEMP/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
 
-          # 1. 릴리즈 빌드 결과물 경로 탐색
-          for candidate in \
-            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
-            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
-            $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1) \
-            $(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1); do
-            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Searching all DerivedData fallback..."
+            APP_PATH=$(find "$RUNNER_TEMP/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          fi
 
-          if [ -z "$APP_PATH" ]; then
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Compiled Runner.app not found!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+            find "$RUNNER_TEMP" -maxdepth 5 || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # SideStore 충돌 방지: 잔여 확장 플러그인 제거
+          # 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
