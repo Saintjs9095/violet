@@ -37,89 +37,54 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Strip ShareExtension Target
+      - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 블록 완전 제거
+          # Podfile에서만 안전하게 ShareExtension 블록 제거 (pbxproj는 손상 방지를 위해 손대지 않음)
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
-
-          # 2. Xcode 프로젝트 스킴(Runner.xcscheme)에서 ShareExtension 빌드 액션 제거
-          SCHEME_PATH="Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme"
-          if [ -f "$SCHEME_PATH" ]; then
-            python3 -c '
-          import xml.etree.ElementTree as ET
-          tree = ET.parse("Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme")
-          root = tree.getroot()
-          for buildable_ref in root.findall(".//BuildableReference"):
-              if "ShareExtension" in buildable_ref.attrib.get("BlueprintName", ""):
-                  entry = root.find(".//BuildActionEntry[@buildForAnalyzing]")
-                  for item in root.findall(".//BuildActionEntry"):
-                      ref = item.find("BuildableReference")
-                      if ref is not None and "ShareExtension" in ref.attrib.get("BlueprintName", ""):
-                          root.find(".//BuildActionEntries").remove(item)
-          tree.write("Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme")
-          ' || true
-          fi
-
-          # 3. pbxproj에서 ShareExtension 타깃 참조 제거
-          sed -i '' '/ShareExtension/d' Runner.xcodeproj/project.pbxproj || true
-
-          # 4. xcconfig 서명 비활성화
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGN_IDENTITY = " >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-          done
 
       - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 7분간 정상 컴파일을 완주하고 사후 검증 단계(exit 1)를 넘겨 산출물 보존
+          # 6~7분간 온전한 컴파일 완주 후 팀 서명 에러(exit 1)를 넘겨 결과물 보존
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Searching compiled Runner.app ==="
+          echo "=== Locating compiled Runner.app in Release-iphoneos ==="
+          
+          # 정확한 워크스페이스 빌드 산출 경로 우선 탐색
           APP_PATH=""
-
-          # 1. 표준 산출물 경로 우선 검색
-          for candidate in \
-            "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" \
-            "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" \
-            $(find "$GITHUB_WORKSPACE/violet/build" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos" | head -n 1); do
-            if [ -d "$candidate" ] && [ -f "$candidate/Runner" ]; then
-              APP_PATH="$candidate"
-              break
-            fi
-          done
-
-          # 2. DerivedData 전체 탐색 (Flutter가 build 폴더를 비웠을 경우 대비)
-          if [ -z "$APP_PATH" ]; then
-            echo "Searching in Xcode DerivedData..."
-            DERIVED_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
-            if [ -n "$DERIVED_APP" ]; then
-              APP_PATH=$(dirname "$DERIVED_APP")
-            fi
+          if [ -d "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" ]; then
+            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
+          elif [ -d "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" ]; then
+            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app"
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Executable Runner binary not found anywhere on disk!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+          # 보조 탐색: 시스템 전체에서 유효한 Runner.app 탐색
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Searching system fallbacks..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Compiled Runner.app not found!"
+            find "$GITHUB_WORKSPACE/violet" -maxdepth 4 || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -lh "$APP_PATH/Runner"
+          ls -la "$APP_PATH"
 
           # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 잔여 플러그인 확장 폴더 제거
+          # SideStore 충돌 방지: 잔여 확장 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
