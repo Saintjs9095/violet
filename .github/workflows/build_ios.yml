@@ -40,7 +40,7 @@ jobs:
       - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # Podfile에서만 안전하게 ShareExtension 블록 제거 (pbxproj는 손상 방지를 위해 손대지 않음)
+          # Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
@@ -49,35 +49,40 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 6~7분간 온전한 컴파일 완주 후 팀 서명 에러(exit 1)를 넘겨 결과물 보존
+          # 4~5분간 정규 릴리즈 AOT 컴파일 완주
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in Release-iphoneos ==="
+          echo "=== Locating true compiled Runner.app in DerivedData ==="
           
-          # 정확한 워크스페이스 빌드 산출 경로 우선 탐색
+          # 1. Xcode DerivedData 내부의 실제 바이너리가 존재하는 Runner.app 탐색
           APP_PATH=""
-          if [ -d "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" ]; then
-            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
-          elif [ -d "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" ]; then
-            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app"
+          while IFS= read -r candidate; do
+            if [ -f "$candidate/Runner" ] && [ -s "$candidate/Runner" ]; then
+              APP_PATH="$candidate"
+              echo "Found valid compiled bundle with executable at: $APP_PATH"
+              break
+            fi
+          done < <(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
+
+          # 2. 시스템 전체 폴백 탐색
+          if [ -z "$APP_PATH" ]; then
+            echo "Searching all system locations for non-empty Runner binary..."
+            REAL_BIN=$(find /Users/runner -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
+            if [ -n "$REAL_BIN" ]; then
+              APP_PATH=$(dirname "$REAL_BIN")
+            fi
           fi
 
-          # 보조 탐색: 시스템 전체에서 유효한 Runner.app 탐색
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "Searching system fallbacks..."
-            APP_PATH=$(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-          fi
-
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app not found!"
-            find "$GITHUB_WORKSPACE/violet" -maxdepth 4 || true
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled executable Runner binary could not be found!"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner" -ls || true
             exit 1
           fi
 
-          echo "Target Bundle Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          echo "Final Selected App Path: $APP_PATH"
+          ls -lh "$APP_PATH/Runner"
 
           # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
