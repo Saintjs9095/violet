@@ -37,82 +37,62 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Detach ShareExtension from Xcode Target
+      - name: Clean Podfile
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # Podfile에서 ShareExtension 타깃 블록 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. pbxproj에서 Runner의 타깃 의존성(ShareExtension)을 안전하게 분리
-          python3 -c '
-          with open("Runner.xcodeproj/project.pbxproj", "r") as f:
-              content = f.read()
-
-          # Runner 타깃의 dependencies에서 ShareExtension 참조 블록 무력화
-          import re
-          # PBXTargetDependency 중 ShareExtension을 가리키는 UUID 탐색 및 제거
-          dep_uuids = re.findall(r"([0-9A-F]{24})\s*/\*\s*PBXTargetDependency.*ShareExtension", content)
-          for u in dep_uuids:
-              content = re.sub(rf"\s*{u}\s*/\*.*?\*/,", "", content)
-              content = re.sub(rf"\s*{u}\s*=\s*\{{.*?\}};", "", content, flags=re.DOTALL)
-
-          # PBXContainerItemProxy 중 ShareExtension 제거
-          proxy_uuids = re.findall(r"([0-9A-F]{24})\s*/\*\s*PBXContainerItemProxy.*ShareExtension", content)
-          for u in proxy_uuids:
-              content = re.sub(rf"\s*{u}\s*=\s*\{{.*?\}};", "", content, flags=re.DOTALL)
-
-          with open("Runner.xcodeproj/project.pbxproj", "w") as f:
-              f.write(content)
-          print("Successfully decoupled ShareExtension dependency from Runner target.")
-          '
-
-      - name: Build Unsigned Release App Bundle
+      - name: Build Unsigned Xcode Archive
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # ShareExtension 간섭 없이 Runner 메인 앱만 단독으로 6분간 완벽 링크 컴파일
-          flutter build ios --release --no-codesign || true
+          # 1. Flutter AOT 엔진 및 플러그인 컴파일 (선행 필수 단계)
+          flutter build ios --config-only --release --no-codesign
+
+          # 2. xcodebuild archive 명령으로 온전한 무서명 번들 직접 생성
+          cd ios
+          xcodebuild archive \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            COMPILER_INDEX_STORE_ENABLE=NO || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating true compiled Runner.app ==="
+          echo "=== Locating compiled Runner.app in Archive ==="
           
-          # 시스템 전체에서 Runner 실행 파일이 실존하는 디렉터리 검색
-          APP_PATH=""
-          while IFS= read -r bin; do
-            if [ -f "$bin" ] && [ -s "$bin" ]; then
-              APP_PATH=$(dirname "$bin")
-              echo "Discovered real executable bundle: $APP_PATH"
-              break
-            fi
-          done < <(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner")
+          # 1. xcarchive 내부의 Applications/Runner.app 직접 지정
+          APP_PATH="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app"
 
-          # 2차 폴백: 크기 1MB 이상의 바이너리 전역 검색
-          if [ -z "$APP_PATH" ]; then
-            echo "Deep fallback searching for any compiled Runner binary..."
-            FALLBACK_BIN=$(find /Users/runner -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Runner.app/Runner" | head -n 1)
-            if [ -n "$FALLBACK_BIN" ]; then
-              APP_PATH=$(dirname "$FALLBACK_BIN")
-            fi
+          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "Searching all xcarchive directories..."
+            APP_PATH=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications/Runner.app" | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled executable Runner binary could not be found!"
-            find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 || true
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Compiled Runner.app not found in archive!"
+            find "$RUNNER_TEMP" -maxdepth 5 || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -lh "$APP_PATH/Runner"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 플러그인 확장 폴더 제거
+          # 잔여 플러그인 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
