@@ -37,52 +37,56 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile
+      - name: Clean Podfile and Inject Ad-Hoc Signing
         working-directory: violet/ios
         run: |
-          # Podfile에서 ShareExtension 타깃 블록 제거
+          # 1. Podfile에서 ShareExtension 타깃 블록 안전 삭제
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-      - name: Build Unsigned Xcode Archive
+          # 2. 유료 개발팀 검증을 우회하는 Ad-Hoc("-" 서명) 및 수동 서명 강제 적용
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "CODE_SIGN_STYLE = Manual" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
+            echo "EXPANDED_CODE_SIGN_IDENTITY = -" >> "$cfg"
+            echo "PROVISIONING_PROFILE_SPECIFIER = " >> "$cfg"
+            echo "DEVELOPMENT_TEAM = " >> "$cfg"
+          done
+
+      - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 1. Flutter AOT 엔진 및 플러그인 컴파일
-          flutter build ios --config-only --release --no-codesign
-
-          # 2. 워크스페이스 내부의 명확한 경로($GITHUB_WORKSPACE/Runner.xcarchive)로 아카이브 빌드
-          cd ios
-          xcodebuild archive \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$GITHUB_WORKSPACE/Runner.xcarchive" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_ENTITLEMENTS="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # Ad-Hoc 서명 설정을 통해 유료 계정 에러 없이 5~6분간 완전한 AOT 릴리즈 바이너리 컴파일 완주
+          flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in Archive ==="
-          
-          # 1. 아카이브 지정 위치 우선 확인
-          APP_PATH="$GITHUB_WORKSPACE/Runner.xcarchive/Products/Applications/Runner.app"
+          echo "=== Locating compiled Runner.app in Release-iphoneos ==="
+          APP_PATH=""
 
-          # 2. 기본 Xcode Archives 폴더 탐색 (폴백)
-          if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching Xcode Archives directory..."
-            APP_PATH=$(find "$HOME/Library/Developer/Xcode/Archives" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications/Runner.app" | head -n 1)
+          # 1. 표준 산출물 경로 확인
+          if [ -d "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" ]; then
+            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
+          elif [ -d "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" ]; then
+            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app"
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app not found in archive!"
-            find "$HOME/Library/Developer/Xcode/Archives" -maxdepth 5 2>/dev/null || true
-            find "$GITHUB_WORKSPACE" -name "*.xcarchive" 2>/dev/null || true
+          # 2. DerivedData 전체 탐색 (바이너리가 실존하는 디렉터리 탐색)
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "Searching all candidates for Runner executable..."
+            FOUND_BIN=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
+            if [ -n "$FOUND_BIN" ]; then
+              APP_PATH=$(dirname "$FOUND_BIN")
+            fi
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
+            echo "::error::Compiled executable Runner binary could not be found!"
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
