@@ -49,38 +49,40 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 1. Flutter AOT 엔진 및 플러그인 컴파일 (선행 필수 단계)
+          # 1. Flutter AOT 엔진 및 플러그인 컴파일
           flutter build ios --config-only --release --no-codesign
 
-          # 2. xcodebuild archive 명령으로 온전한 무서명 번들 직접 생성
+          # 2. 워크스페이스 내부의 명확한 경로($GITHUB_WORKSPACE/Runner.xcarchive)로 아카이브 빌드
           cd ios
           xcodebuild archive \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -archivePath "$GITHUB_WORKSPACE/Runner.xcarchive" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_ENTITLEMENTS="" \
-            COMPILER_INDEX_STORE_ENABLE=NO || true
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Runner.app in Archive ==="
           
-          # 1. xcarchive 내부의 Applications/Runner.app 직접 지정
-          APP_PATH="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app"
+          # 1. 아카이브 지정 위치 우선 확인
+          APP_PATH="$GITHUB_WORKSPACE/Runner.xcarchive/Products/Applications/Runner.app"
 
+          # 2. 기본 Xcode Archives 폴더 탐색 (폴백)
           if [ ! -d "$APP_PATH" ] || [ ! -f "$APP_PATH/Info.plist" ]; then
-            echo "Searching all xcarchive directories..."
-            APP_PATH=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications/Runner.app" | head -n 1)
+            echo "Searching Xcode Archives directory..."
+            APP_PATH=$(find "$HOME/Library/Developer/Xcode/Archives" "$GITHUB_WORKSPACE" -type d -name "Runner.app" 2>/dev/null | grep -E "Applications/Runner.app" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Compiled Runner.app not found in archive!"
-            find "$RUNNER_TEMP" -maxdepth 5 || true
+            find "$HOME/Library/Developer/Xcode/Archives" -maxdepth 5 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -name "*.xcarchive" 2>/dev/null || true
             exit 1
           fi
 
