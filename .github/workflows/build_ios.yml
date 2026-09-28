@@ -47,7 +47,6 @@ jobs:
       - name: Mock Missing Salt Files
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: |
-          # Git 미추적 보안 파일 (salt.dart, wsalt.dart) 자동 생성
           mkdir -p lib/server
 
           cat << 'EOF' > lib/server/salt.dart
@@ -166,19 +165,30 @@ jobs:
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # 1. Info.plist 보강 및 템플릿 변수 실값 완전 치환
+          # 1. Plist를 XML 포맷으로 안전하게 변환 후 PlistBuddy로 변수 확정 주입
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
           fi
 
-          sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
-          sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
-          sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
-          sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
-          sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
+          plutil -convert xml1 "$PLIST_PATH" 2>/dev/null || true
 
-          # 2. 컴파일된 Runner 실행 바이너리 주입
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Runner" "$PLIST_PATH" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string Runner" "$PLIST_PATH" 2>/dev/null || true
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier xyz.project.violet" "$PLIST_PATH" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string xyz.project.violet" "$PLIST_PATH" 2>/dev/null || true
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName Violet" "$PLIST_PATH" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleName string Violet" "$PLIST_PATH" 2>/dev/null || true
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.34.3" "$PLIST_PATH" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.34.3" "$PLIST_PATH" 2>/dev/null || true
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$PLIST_PATH" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "$PLIST_PATH" 2>/dev/null || true
+
+          # 2. 컴파일된 Runner 실행 바이너리 존재 확인 및 주입 보정
           if [ ! -f "Payload/Runner.app/Runner" ] || [ $(stat -f%z "Payload/Runner.app/Runner" 2>/dev/null || echo 0) -lt 500000 ]; then
             echo "Searching for compiled Runner binary..."
             FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | head -n 1)
@@ -200,7 +210,7 @@ jobs:
           file "Payload/Runner.app/Runner" || true
           ls -lh "Payload/Runner.app/Runner" || true
 
-          # 4. 잔여 플러그인 확장 폴더 제거
+          # 4. 불필요 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # 5. ZIP 압축
