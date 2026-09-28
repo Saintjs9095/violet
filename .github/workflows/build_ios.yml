@@ -33,29 +33,30 @@ jobs:
           flutter-version: '3.35.4'
           cache: true
 
+      - name: Locate Project Root
+        id: locate
+        run: |
+          PROJ_DIR=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name "pubspec.yaml" -exec dirname {} \; | head -n 1)
+          echo "Project directory is: $PROJ_DIR"
+          echo "proj_dir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
-        working-directory: violet
+        working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension and Set Ad-Hoc Signing
-        working-directory: violet/ios
+      - name: Decouple ShareExtension and Setup Workspace
+        working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 안전 제거
+          # Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 ShareExtension 제거 및 Ad-Hoc('-') 서명 적용
+          # Ruby xcodeproj로 ShareExtension 타깃 완전 분리
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
-
-            # ShareExtension 타깃 완전 삭제
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
-            if share_target
-              puts "Removing ShareExtension target..."
-              share_target.remove_from_project
-            end
+            share_target.remove_from_project if share_target
 
-            # Runner 타깃 의존성 및 Embed 확장 정리
             runner_target = project.targets.find { |t| t.name == "Runner" }
             if runner_target
               runner_target.dependencies.delete_if do |dep|
@@ -65,66 +66,53 @@ jobs:
                 phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension")
               end
             end
-
-            # Runner 타깃에 Ad-Hoc 서명 설정 주입
-            project.targets.each do |target|
-              target.build_configurations.each do |config|
-                config.build_settings["CODE_SIGN_STYLE"] = "Manual"
-                config.build_settings["CODE_SIGN_IDENTITY"] = "-"
-                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
-                config.build_settings["CODE_SIGNING_ALLOWED"] = "YES"
-                config.build_settings["DEVELOPMENT_TEAM"] = ""
-                config.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = ""
-              end
-            end
-
             project.save
-            puts "Project configured successfully!"
           '
 
-      - name: Build Unsigned Release App Bundle
-        working-directory: violet
+      - name: Build Runner App with Native Xcodebuild
+        working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter 및 Xcode 컴파일 실행 (산출물 SYMROOT를 RUNNER_TEMP/build_out으로 직접 고정)
-          mkdir -p "$RUNNER_TEMP/build_out"
-          flutter build ios --release --no-codesign || true
+          mkdir -p "$GITHUB_WORKSPACE/build_output"
+          
+          # Flutter AOT 엔진 및 리소스 선행 생성
+          flutter build ios --config-only --release --no-codesign
+
+          # Xcode를 통해 직접 CONFIGURATION_BUILD_DIR로 바이너리 및 번들 산출 강제
+          cd ios
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/build_output" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Application Bundle ==="
-          APP_PATH=""
+          echo "=== Checking Output Directory ==="
+          ls -la "$GITHUB_WORKSPACE/build_output"
 
-          # 1. 릴리즈 빌드 폴더 내 모든 .app 번들 실시간 탐색 (삼중 경로 제거)
-          while IFS= read -r candidate; do
-            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
-              APP_PATH="$candidate"
-              echo "Discovered verified bundle at: $APP_PATH"
-              break
-            fi
-          done < <(find /Users/runner/work -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos")
+          APP_PATH=$(find "$GITHUB_WORKSPACE/build_output" -maxdepth 2 -type d -name "*.app" 2>/dev/null | head -n 1)
 
-          # 2. DerivedData 전체 탐색 (폴백)
-          if [ -z "$APP_PATH" ]; then
-            echo "Searching DerivedData..."
-            while IFS= read -r candidate; do
-              if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
-                APP_PATH="$candidate"
-                echo "Discovered bundle in DerivedData: $APP_PATH"
-                break
-              fi
-            done < <(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos")
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Searching all workspace for app bundle..."
+            APP_PATH=$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|build_output" | head -n 1)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Compiled Application bundle could not be found!"
-            find /Users/runner/work -name "Info.plist" || true
+            find "$GITHUB_WORKSPACE" -maxdepth 4 || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          ls -lh "$APP_PATH"
 
           # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
