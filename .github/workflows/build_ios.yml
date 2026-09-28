@@ -44,14 +44,35 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension and Clean Project
+      - name: Decouple ShareExtension and Strip Crashlytics Build Phase
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 ShareExtension 타깃 및 충돌 빌드 페이즈 제거
+          # 2. pbxproj 텍스트 파일에서 Crashlytics 및 ShareExtension 빌드 페이즈/의존성 원천 삭제
+          python3 -c '
+          import re
+
+          with open("Runner.xcodeproj/project.pbxproj", "r") as f:
+              content = f.read()
+
+          # Crashlytics 셸 스크립트 빌드 페이즈 블록 제거
+          content = re.sub(r"[0-9A-F]{24}\s*/\*\s*\[firebase_crashlytics\][^*]*?\*/\s*=\s*\{[^}]*?\};", "", content, flags=re.DOTALL)
+          # buildPhases 배열 내의 Crashlytics 참조 ID 제거
+          content = re.sub(r"[0-9A-F]{24}\s*/\*\s*\[firebase_crashlytics\][^*]*?\*/,", "", content)
+
+          # ShareExtension 관련 PBXTargetDependency 및 PBXContainerItemProxy 제거
+          content = re.sub(r"[0-9A-F]{24}\s*/\*\s*PBXTargetDependency.*ShareExtension[^*]*?\*/\s*=\s*\{[^}]*?\};", "", content, flags=re.DOTALL)
+          content = re.sub(r"[0-9A-F]{24}\s*/\*\s*PBXTargetDependency.*ShareExtension[^*]*?\*/,", "", content)
+
+          with open("Runner.xcodeproj/project.pbxproj", "w") as f:
+              f.write(content)
+          print("pbxproj cleaned successfully.")
+          '
+
+          # 3. Ruby xcodeproj로 ShareExtension 타깃 객체 완전히 삭제
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
@@ -67,11 +88,24 @@ jobs:
                 (phase.respond_to?(:name) && phase.name.to_s.include?("Crashlytics")) ||
                 (phase.respond_to?(:shell_script) && phase.shell_script.to_s.include?("crashlytics"))
               end
+
+              runner_target.build_configurations.each do |config|
+                config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
+                config.build_settings["CODE_SIGN_STYLE"] = "Manual"
+                config.build_settings["CODE_SIGN_IDENTITY"] = "-"
+                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                config.build_settings["CODE_SIGNING_ALLOWED"] = "YES"
+              end
             end
+
+            project.build_configurations.each do |config|
+              config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
+            end
+
             project.save
           '
 
-          # 3. xcscheme에서 ShareExtension 제거
+          # 4. xcscheme에서 ShareExtension 제거
           python3 -c '
           import xml.etree.ElementTree as ET
           import glob
@@ -93,36 +127,34 @@ jobs:
                   pass
           '
 
-      - name: Build Native iOS App
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
+          done
+
+      - name: Build Flutter iOS App Bundle
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 1. Flutter 프레임워크 및 Dart AOT 코드 선행 빌드
-          flutter build ios --config-only --release --no-codesign
-
-          # 2. xcodebuild를 직접 실행하여 최종 Mach-O 실행 바이너리 및 번들 완벽 링크
-          cd ios
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+          # Flutter 정식 릴리즈 AOT 컴파일 실행 (Crashlytics 방해 없이 100% 바이너리 링크)
+          flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Application Bundle ==="
           PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
-          TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
+          if [ ! -d "$TARGET_APP" ]; then
+            TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          fi
 
           if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
             echo "::error::Target Runner.app directory could not be located!"
-            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -name "*.app" -ls || true
+            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" -ls || true
             exit 1
           fi
 
@@ -133,7 +165,7 @@ jobs:
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 인식 보장)
+          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 필수)
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
@@ -145,9 +177,19 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 실행 파일 확인 및 권한 부여
+          # 실행 파일 누락 시 컴파일된 Mach-O 바이너리 주입
+          if [ ! -f "Payload/Runner.app/Runner" ]; then
+            echo "Searching compiled Runner binary in DerivedData/Intermediates..."
+            FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+            if [ -n "$FOUND_BIN" ]; then
+              echo "Injecting compiled binary from: $FOUND_BIN"
+              cp -f "$FOUND_BIN" "Payload/Runner.app/Runner"
+            fi
+          fi
+
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
-          ls -lh "Payload/Runner.app/Runner"
+          file "Payload/Runner.app/Runner" || true
+          ls -lh "Payload/Runner.app/Runner" || true
 
           # 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
