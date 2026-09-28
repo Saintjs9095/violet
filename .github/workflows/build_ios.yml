@@ -44,7 +44,7 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension and Configure Projects
+      - name: Decouple ShareExtension and Clean Project Safe
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
@@ -119,17 +119,28 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+          FLUTTER_ROOT: ${{ env.FLUTTER_ROOT }}
         run: |
-          # Ad-Hoc 서명 에러를 방지하기 위해 완전한 무서명 플래그 주입
+          set -o pipefail
+          
+          # 빌드 실행 및 에러 로그 별도 캡처
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -destination 'generic/platform=iOS' \
+            FLUTTER_APPLICATION_PATH="${{ steps.locate.outputs.proj_dir }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 | tee xcodebuild.log | grep -E "(error:|fatal error:|\(2 failures\)|FAILED|=== BUILD TARGET)" || true
+
+          # 빌드 실패 시 상세 에러 원인 즉시 출력
+          if grep -q "The following build commands failed" xcodebuild.log || grep -q "(2 failures)" xcodebuild.log; then
+            echo "::error::=== Detailed Failure Summary ==="
+            grep -A 5 -B 2 -E "error:|fatal error:|The following build commands failed" xcodebuild.log || true
+            exit 1
+          fi
 
       - name: Package Payload into SideStore IPA
         run: |
