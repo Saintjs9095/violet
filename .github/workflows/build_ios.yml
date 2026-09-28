@@ -110,66 +110,35 @@ jobs:
 
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
             echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY =" >> "$cfg"
             echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
             echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
           done
 
-      - name: Build Flutter iOS App with Bundle Preservation Watcher
+      - name: Build Runner App via Flutter Pipeline
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          mkdir -p "$RUNNER_TEMP/SavedRunner.app"
-
-          # 백그라운드 Watcher: 컴파일된 Runner 바이너리와 번들이 생성되는 즉시 보존 복사
-          (
-            while true; do
-              FOUND_APP=$(find build/ios/Release-iphoneos "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-              if [ -n "$FOUND_APP" ] && [ -f "$FOUND_APP/Info.plist" ]; then
-                cp -R "$FOUND_APP/"* "$RUNNER_TEMP/SavedRunner.app/" 2>/dev/null || true
-              fi
-              sleep 2
-            done
-          ) &
-          WATCHER_PID=$!
-
-          # 5분 동안 온전한 Dart AOT + Swift 컴파일 수행
+          # 6분간 전체 C++, Rust, Swift, Dart 컴파일 완주
           flutter build ios --release --no-codesign || true
-
-          # 빌드 완료 후 Watcher 종료 및 최종 동기화
-          kill $WATCHER_PID 2>/dev/null || true
-          
-          # 빌드 직후 산출물 최종 보존
-          FOUND_APP=$(find build/ios/Release-iphoneos "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-          if [ -n "$FOUND_APP" ]; then
-            cp -R "$FOUND_APP/"* "$RUNNER_TEMP/SavedRunner.app/" 2>/dev/null || true
-          fi
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Inspecting Saved App Bundle ==="
+          echo "=== Locating and Assembling SideStore IPA ==="
           PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
-          TARGET_APP="$RUNNER_TEMP/SavedRunner.app"
-          
-          # 보존된 폴더가 비어있을 경우 프로젝트 경로 확인
-          if [ ! -f "$TARGET_APP/Info.plist" ]; then
-            echo "Checking fallback locations..."
-            FALLBACK_APP=$(find "$PROJ_DIR/build/ios/Release-iphoneos" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
-            if [ -n "$FALLBACK_APP" ]; then
-              TARGET_APP="$FALLBACK_APP"
-            fi
+          TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
+          if [ ! -d "$TARGET_APP" ]; then
+            TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
           fi
 
           echo "Target App Path: $TARGET_APP"
-          ls -la "$TARGET_APP"
 
           rm -rf Payload Violet.ipa
-          mkdir -p Payload/Runner.app
-          cp -R "$TARGET_APP/"* Payload/Runner.app/
+          mkdir -p Payload
+          cp -R "$TARGET_APP" Payload/
 
-          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 필수)
+          # 1. Info.plist 보강 및 템플릿 변수 실값 완전 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
@@ -181,15 +150,49 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 실행 파일 권한 부여 및 확인
-          chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
-          file "Payload/Runner.app/Runner" || true
-          ls -lh "Payload/Runner.app/Runner" || true
+          # 2. 컴파일된 메인 바이너리(수십 MB) 검색 및 주입
+          if [ ! -f "Payload/Runner.app/Runner" ] || [ $(stat -f%z "Payload/Runner.app/Runner" 2>/dev/null || echo 0) -lt 500000 ]; then
+            echo "Searching for compiled Runner binary in DerivedData Products and Intermediate..."
+            
+            # DerivedData의 Products 또는 Intermediates에서 컴파일된 Mach-O 실행 파일 탐색
+            BIN_FOUND=""
+            while IFS= read -r f; do
+              if file "$f" | grep -q "Mach-O 64-bit arm64"; then
+                BIN_FOUND="$f"
+                echo "Discovered compiled Mach-O binary: $BIN_FOUND ($(ls -lh "$f" | awk '{print $5}'))"
+                break
+              fi
+            done < <(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type f -name "Runner" -size +1M 2>/dev/null)
 
-          # 잔여 플러그인 확장 폴더 제거
+            # 2차 탐색: 이름과 상관없이 Runner.build 디렉터리 내의 링크된 오브젝트/바이너리
+            if [ -z "$BIN_FOUND" ]; then
+              while IFS= read -r f; do
+                if file "$f" | grep -q "Mach-O 64-bit arm64 executable"; then
+                  BIN_FOUND="$f"
+                  echo "Discovered Mach-O executable: $BIN_FOUND"
+                  break
+                fi
+              done < <(find "$HOME/Library/Developer/Xcode/DerivedData" -type f -size +1M 2>/dev/null)
+            fi
+
+            if [ -n "$BIN_FOUND" ]; then
+              cp -f "$BIN_FOUND" "Payload/Runner.app/Runner"
+            else
+              echo "::error::Could not locate compiled Mach-O Runner binary!"
+              find "$HOME/Library/Developer/Xcode/DerivedData" -name "*Runner*" -ls || true
+              exit 1
+            fi
+          fi
+
+          # 3. 바이너리 실행 권한 부여 및 확인
+          chmod 755 "Payload/Runner.app/Runner"
+          file "Payload/Runner.app/Runner"
+          ls -lh "Payload/Runner.app/Runner"
+
+          # 4. 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
-          # ZIP 압축
+          # 5. ZIP 압축
           zip -r -q Violet.ipa Payload
 
           echo "=== Final IPA File Details ==="
