@@ -44,28 +44,34 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension and Satisfy Development Team
+      - name: Reconfigure Xcode Project Targets
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 ShareExtension 제거 및 더미 Team ID 주입
+          # 2. Ruby xcodeproj로 ShareExtension 및 Crashlytics 업로드 스크립트 제거
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
+
+            # ShareExtension 타깃 삭제
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
             share_target.remove_from_project if share_target
 
             runner_target = project.targets.find { |t| t.name == "Runner" }
             if runner_target
+              # ShareExtension 의존성 제거
               runner_target.dependencies.delete_if do |dep|
                 dep.target.nil? || dep.target.name == "ShareExtension" || (dep.respond_to?(:display_name) && dep.display_name.to_s.include?("ShareExtension"))
               end
+              # Extension 및 Crashlytics 업로드 빌드 페이즈 제거
               runner_target.build_phases.delete_if do |phase|
-                phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension")
+                phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension") ||
+                (phase.respond_to?(:name) && phase.name.to_s.include?("Crashlytics"))
               end
 
+              # Runner 타깃 서명 설정
               runner_target.build_configurations.each do |config|
                 config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
                 config.build_settings["CODE_SIGN_STYLE"] = "Manual"
@@ -80,7 +86,7 @@ jobs:
             end
 
             project.save
-            puts "Project configured with dummy team ID!"
+            puts "Project configured successfully without Crashlytics upload blocking!"
           '
 
           # 3. xcconfig 파일에 더미 팀 주입
@@ -93,7 +99,6 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 비치명적 서명 경고 exit 1을 넘겨 컴파일 산출물 보존
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
@@ -101,31 +106,36 @@ jobs:
           echo "=== Locating compiled Application Bundle ==="
           APP_PATH=""
 
-          # 1. DerivedData의 Products 디렉터리 및 워크스페이스 내 Runner.app 직접 추출
+          # Info.plist와 바이너리가 모두 온전한 번들 탐색
           while IFS= read -r candidate; do
-            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
+            if [ -f "$candidate/Info.plist" ] && [ -f "$candidate/Runner" ]; then
               APP_PATH="$candidate"
-              echo "Discovered compiled app bundle: $APP_PATH"
+              echo "Discovered full bundle at: $APP_PATH"
               break
             fi
-          done < <(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
+          done < <(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null)
 
-          # 2. 시스템 전체 폴백 탐색
+          # 2차 탐색: Info.plist가 있는 번들
           if [ -z "$APP_PATH" ]; then
-            echo "Fallback searching for any Runner.app..."
-            APP_PATH=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+            while IFS= read -r candidate; do
+              if [ -f "$candidate/Info.plist" ]; then
+                APP_PATH="$candidate"
+                echo "Discovered candidate: $APP_PATH"
+                break
+              fi
+            done < <(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null)
           fi
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Runner.app could not be found!"
-            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null || true
+            find /Users/runner/work -name "Runner*" 2>/dev/null || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -la "$APP_PATH"
 
-          # SideStore 표준 Payload 디렉터리 구성
+          # SideStore 표준 Payload 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
