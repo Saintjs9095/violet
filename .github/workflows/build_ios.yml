@@ -110,17 +110,30 @@ jobs:
 
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
             echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY =" >> "$cfg"
             echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
             echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
           done
 
-      - name: Build Runner App via Flutter Pipeline
+      - name: Build Flutter Pipeline and Link Runner Mach-O
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # C++, Rust, Swift, Dart 및 LinkFileList 전체 생성
+          # 1. Flutter 공식 파이프라인으로 Dart kernel_snapshot, AOT, CocoaPods, Rust 빌드 완주
           flutter build ios --release --no-codesign || true
+
+          # 2. 산출된 오브젝트 파일들을 xcodebuild로 최종 Mach-O 바이너리로 연결
+          cd ios
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO || true
 
       - name: Package Payload into SideStore IPA
         run: |
@@ -129,7 +142,7 @@ jobs:
 
           TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
           if [ ! -d "$TARGET_APP" ]; then
-            TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+            TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
           fi
 
           echo "Target App Path: $TARGET_APP"
@@ -138,7 +151,7 @@ jobs:
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # 1. Info.plist 보강 및 템플릿 변수 실값 완전 치환
+          # 1. Info.plist 보강 및 템플릿 변수 실값 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
@@ -150,41 +163,29 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 2. DerivedData에 생성된 LinkFileList를 바탕으로 Runner 바이너리 링크
-          DERIVED_RUNNER=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.build" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-          LINK_FILE_LIST="$DERIVED_RUNNER/Objects-normal/arm64/Runner.LinkFileList"
+          # 2. 컴파일된 Runner 실행 바이너리 주입
+          if [ ! -f "Payload/Runner.app/Runner" ] || [ $(stat -f%z "Payload/Runner.app/Runner" 2>/dev/null || echo 0) -lt 500000 ]; then
+            echo "Searching for compiled Runner binary in DerivedData Products..."
+            FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+            
+            if [ -z "$FOUND_BIN" ]; then
+              FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -size +1M 2>/dev/null | head -n 1)
+            fi
 
-          echo "Found DerivedData Runner.build at: $DERIVED_RUNNER"
-          echo "Found LinkFileList: $LINK_FILE_LIST"
-
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          PRODUCTS_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Release-iphoneos" 2>/dev/null | grep -E "Build/Products" | head -n 1)
-
-          echo "Linking final Mach-O executable with clang++..."
-          xcrun clang++ \
-            -target arm64-apple-ios14.0 \
-            -isysroot "$SDK_PATH" \
-            -F"$PRODUCTS_DIR" \
-            -F"$PROJ_DIR/build/ios/Release-iphoneos" \
-            -F"$PROJ_DIR/ios/Flutter" \
-            -L"$PRODUCTS_DIR" \
-            -filelist "$LINK_FILE_LIST" \
-            -framework Foundation \
-            -framework UIKit \
-            -framework Flutter \
-            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
-            -o "Payload/Runner.app/Runner" || true
-
-          # 만약 clang++ 직접 링크로 생성되지 않았을 경우, 백업 오브젝트/바이너리 확인
-          if [ ! -f "Payload/Runner.app/Runner" ] || [ $(stat -f%z "Payload/Runner.app/Runner" 2>/dev/null || echo 0) -lt 100000 ]; then
-            echo "Direct clang link completed, checking generated executable..."
-            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner" -ls || true
+            if [ -n "$FOUND_BIN" ]; then
+              echo "Injecting compiled binary from: $FOUND_BIN"
+              cp -f "$FOUND_BIN" "Payload/Runner.app/Runner"
+            else
+              echo "::error::Could not find compiled Runner binary!"
+              find "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner" -ls || true
+              exit 1
+            fi
           fi
 
-          # 3. 바이너리 실행 권한 부여 및 타입 확인
-          chmod 755 "Payload/Runner.app/Runner" || true
-          file "Payload/Runner.app/Runner" || true
-          ls -lh "Payload/Runner.app/Runner" || true
+          # 3. 바이너리 실행 권한 부여 및 확인
+          chmod 755 "Payload/Runner.app/Runner"
+          file "Payload/Runner.app/Runner"
+          ls -lh "Payload/Runner.app/Runner"
 
           # 4. 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
