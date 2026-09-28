@@ -115,18 +115,18 @@ jobs:
             echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
           done
 
-      - name: Precompile Flutter Dart AOT Assets
+      - name: Precompile Flutter Dart AOT Engine
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: |
-          # Dart AOT 엔진 및 App.framework 사전 생성 (xcodebuild 실패 방지)
-          flutter assemble -dTargetPlatform=ios -dBuildMode=release release_unpack_ios
+          # Flutter 공식 assemble에 output 디렉터리를 명시하여 App.framework 및 Flutter.framework 사전 완비
+          mkdir -p ios/Flutter/App.framework
+          flutter assemble -dTargetPlatform=ios -dBuildMode=release -o ios/Flutter release_unpack_ios
 
       - name: Build Runner App with Native Xcodebuild
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter CLI 삭제 루틴 없이 xcodebuild로 직접 Mach-O 바이너리 및 번들 완성
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -143,11 +143,11 @@ jobs:
           echo "=== Locating compiled Application Bundle ==="
           APP_PATH=""
 
-          # DerivedData 및 워크스페이스 내에서 Runner 실행 파일이 실존하는 Runner.app 탐색
+          # Runner 바이너리가 완벽히 링크된 Runner.app 탐색
           while IFS= read -r candidate; do
             if [ -d "$candidate" ] && [ -f "$candidate/Runner" ]; then
               APP_PATH="$candidate"
-              echo "Discovered full bundle with binary at: $APP_PATH"
+              echo "Discovered full bundle with Mach-O binary at: $APP_PATH"
               break
             fi
           done < <(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
@@ -168,7 +168,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # Info.plist 템플릿 변수 치환
+          # Info.plist 템플릿 변수 실값 완전 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ -f "$PLIST_PATH" ]; then
             sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
@@ -178,12 +178,11 @@ jobs:
             sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
           fi
 
-          # 바이너리 권한 부여 및 확인
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
           file "Payload/Runner.app/Runner" || true
           ls -lh "Payload/Runner.app/Runner" || true
 
-          # 잔여 플러그인 확장 폴더 제거
+          # 잔여 플러그인 확장 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
