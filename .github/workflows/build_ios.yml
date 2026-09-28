@@ -97,44 +97,53 @@ jobs:
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Packaging verified Runner.app ==="
+          echo "=== Preparing Payload for SideStore ==="
           
+          # 1. 빌드 폴더 내 Runner.app 탐색
           TARGET_APP="${{ steps.locate.outputs.proj_dir }}/build/ios/Release-iphoneos/Runner.app"
-
           if [ ! -d "$TARGET_APP" ]; then
             TARGET_APP=$(find /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
           fi
-
-          echo "Target App Path: $TARGET_APP"
-          ls -la "$TARGET_APP"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # Info.plist가 없거나 템플릿 변수($(EXECUTABLE_NAME))가 남아있는 경우 실값으로 치환
+          # 2. Info.plist 보강 및 템플릿 변수 실값 완전 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "${{ steps.locate.outputs.proj_dir }}/ios/Runner/Info.plist" "$PLIST_PATH"
           fi
 
-          # SideStore 파싱 에러 방지를 위해 변수 치환
           sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
           sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
           sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
+          sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
+          sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 만약 실제 컴파일된 바이너리가 루트에 누락되어 있다면 Intermediates/DerivedData에서 복사
-          if [ ! -f "Payload/Runner.app/Runner" ]; then
-            echo "Searching compiled Runner binary..."
-            REAL_BIN=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-            if [ -n "$REAL_BIN" ]; then
-              echo "Injecting compiled binary: $REAL_BIN"
-              cp "$REAL_BIN" "Payload/Runner.app/Runner"
-              chmod +x "Payload/Runner.app/Runner"
-            fi
+          # 3. 진짜 컴파일된 실행 바이너리 주입 (Bad file descriptor 원인 해결)
+          echo "Searching true compiled Runner Mach-O binary..."
+          REAL_BIN=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | head -n 1)
+          
+          if [ -z "$REAL_BIN" ]; then
+            REAL_BIN=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -size +1M 2>/dev/null | head -n 1)
           fi
 
-          # 잔여 플러그인 확장 폴더 제거
+          if [ -n "$REAL_BIN" ]; then
+            echo "Injecting verified binary from: $REAL_BIN"
+            cp -f "$REAL_BIN" "Payload/Runner.app/Runner"
+            chmod 755 "Payload/Runner.app/Runner"
+          else
+            echo "::error::No valid compiled Runner binary found above 1MB!"
+            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner" -ls || true
+            exit 1
+          fi
+
+          # 4. 바이너리 정상 확인
+          file "Payload/Runner.app/Runner"
+          ls -lh "Payload/Runner.app/Runner"
+
+          # 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
@@ -145,6 +154,11 @@ jobs:
 
           IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
           echo "Final IPA Size in bytes: $IPA_SIZE"
+
+          if [ "$IPA_SIZE" -lt 10000000 ]; then
+            echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
+            exit 1
+          fi
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
