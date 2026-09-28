@@ -44,18 +44,14 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension and Disable Crashlytics Phase
+      - name: Decouple ShareExtension and Configure Targets
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Crashlytics 심볼 업로드 스크립트 무력화 (CI 실패 원인 제거)
-          find . -name "*crashlytics*" -type f -exec sed -i '' 's/.*upload-symbols.*/exit 0/g' {} + 2>/dev/null || true
-          find . -name "run" -type f -path "*/FirebaseCrashlytics/*" -exec echo 'exit 0' > {} + 2>/dev/null || true
-
-          # 3. Ruby xcodeproj로 ShareExtension 제거 및 Crashlytics 빌드 페이즈 제거
+          # 2. Ruby xcodeproj로 타깃 의존성 정리 및 Crashlytics 무력화
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
@@ -88,28 +84,6 @@ jobs:
             project.save
           '
 
-          # 4. xcscheme 파일 정리
-          python3 -c '
-          import xml.etree.ElementTree as ET
-          import glob
-
-          for p in glob.glob("**/*.xcscheme", recursive=True):
-              try:
-                  tree = ET.parse(p)
-                  root = tree.getroot()
-                  changed = False
-                  for entries in root.findall(".//BuildActionEntries"):
-                      for entry in list(entries):
-                          ref = entry.find("BuildableReference")
-                          if ref is not None and "ShareExtension" in ref.attrib.get("BlueprintName", ""):
-                              entries.remove(entry)
-                              changed = True
-                  if changed:
-                      tree.write(p)
-              except Exception:
-                  pass
-          '
-
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
             echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
             echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
@@ -122,7 +96,6 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Ad-Hoc 바이너리 생성을 강제하여 링크 완료
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
@@ -135,19 +108,11 @@ jobs:
             TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
           fi
 
-          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
-            echo "::error::Target Runner.app directory could not be located!"
-            exit 1
-          fi
-
-          echo "Target App Path: $TARGET_APP"
-          ls -la "$TARGET_APP"
-
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # Info.plist 템플릿 변수 실값 완전 치환
+          # Info.plist 템플릿 변수 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
@@ -159,20 +124,29 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 실행 파일 누락 시 DerivedData 산출물 확인 및 주입
-          if [ ! -f "Payload/Runner.app/Runner" ]; then
-            echo "Searching for compiled Runner binary in DerivedData..."
-            FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | head -n 1)
-            if [ -n "$FOUND_BIN" ]; then
-              echo "Injecting compiled binary from: $FOUND_BIN"
-              cp -f "$FOUND_BIN" "Payload/Runner.app/Runner"
-            fi
+          # 1순위: Intermediates 및 DerivedData 내 컴파일된 Runner 바이너리 전역 검색
+          echo "Searching compiled Runner executable across entire disk..."
+          EXEC_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type f \( -name "Runner" -o -name "Runner-arm64" \) -perm +111 2>/dev/null | grep -E "Runner\.build|Release-iphoneos" | head -n 1)
+
+          if [ -z "$EXEC_BIN" ]; then
+            EXEC_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type f -name "Runner" -size +100k 2>/dev/null | head -n 1)
           fi
 
-          chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
-          ls -lh "Payload/Runner.app/Runner" || true
+          if [ -n "$EXEC_BIN" ]; then
+            echo "Successfully found compiled executable: $EXEC_BIN"
+            cp -f "$EXEC_BIN" "Payload/Runner.app/Runner"
+            chmod 755 "Payload/Runner.app/Runner"
+          else
+            echo "::error::Could not find compiled Runner binary anywhere!"
+            find "$HOME/Library/Developer/Xcode/DerivedData" -name "*Runner*" || true
+            exit 1
+          fi
 
-          # 잔여 플러그인 확장 폴더 제거
+          # 바이너리 타입 및 크기 검증
+          file "Payload/Runner.app/Runner"
+          ls -lh "Payload/Runner.app/Runner"
+
+          # 불필요한 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
