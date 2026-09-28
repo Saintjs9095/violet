@@ -44,12 +44,23 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Implement Proper Salt & Wsalt Handlers
+      - name: Patch Server Endpoint to Custom VM
+        working-directory: ${{ steps.locate.outputs.proj_dir }}
+        run: |
+          echo "=== Patching Backend Server URL to Custom Server ==="
+          # lib 폴더 전체에서 기본 도메인 패턴을 사용자 서버 IP로 일괄 치환
+          # (단일 포트 기본 80/8080/특정포트 또는 HTTP 통신 연결)
+          find lib/ -type f -name "*.dart" -exec sed -i '' 's|https://koromo.xyz|http://129.225.133.125|g' {} +
+          find lib/ -type f -name "*.dart" -exec sed -i '' 's|http://koromo.xyz|http://129.225.133.125|g' {} +
+          
+          # 추가적인 보라색 기본 API 호스트명이 있을 경우를 위한 치환
+          find lib/server/ -type f -name "*.dart" -exec sed -i '' 's|api.projectviolet.org|129.225.133.125|g' {} + 2>/dev/null || true
+
+      - name: Mock Missing Salt Files
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: |
           mkdir -p lib/server
 
-          # crypto 패키지를 이용한 정규 토큰 해싱 구현체 주입
           cat << 'EOF' > lib/server/salt.dart
           import 'dart:convert';
           import 'package:crypto/crypto.dart';
@@ -70,7 +81,7 @@ jobs:
           }
           EOF
 
-          echo "Successfully injected proper crypto-backed salt.dart and wsalt.dart"
+          echo "Successfully injected salt.dart and wsalt.dart"
 
       - name: Verify Dart Compilation
         working-directory: ${{ steps.locate.outputs.proj_dir }}
@@ -83,7 +94,7 @@ jobs:
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 타깃 정리 및 Crashlytics 무력화
+          # 2. Ruby xcodeproj로 타깃 의존성 정리 및 Crashlytics 무력화
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
 
@@ -155,6 +166,7 @@ jobs:
 
       - name: Package Payload into SideStore IPA
         run: |
+          echo "=== Locating and Assembling SideStore IPA ==="
           PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
           TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
@@ -162,10 +174,13 @@ jobs:
             TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
           fi
 
+          echo "Target App Path: $TARGET_APP"
+
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
+          # 1. Info.plist 보강 및 템플릿 변수 실값 완전 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
             cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
@@ -188,16 +203,49 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$PLIST_PATH" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "$PLIST_PATH" 2>/dev/null || true
 
-          # 네트워크 전체 허용 (ATS 해제)
+          # 2. iOS ATS(네트워크 보안) 전면 해제: 우리 VM(HTTP)과의 통신 완전 보장
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PLIST_PATH" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST_PATH" 2>/dev/null || \
           /usr/libexec/PlistBuddy -c "Set :NSAppTransportSecurity:NSAllowsArbitraryLoads true" "$PLIST_PATH" 2>/dev/null || true
 
+          # 3. 컴파일된 Runner 실행 바이너리 존재 확인 및 주입 보정
+          if [ ! -f "Payload/Runner.app/Runner" ] || [ $(stat -f%z "Payload/Runner.app/Runner" 2>/dev/null || echo 0) -lt 500000 ]; then
+            echo "Searching for compiled Runner binary..."
+            FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | head -n 1)
+
+            if [ -n "$FOUND_BIN" ]; then
+              echo "Injecting compiled binary from: $FOUND_BIN"
+              cp -f "$FOUND_BIN" "Payload/Runner.app/Runner"
+            else
+              echo "Checking any Mach-O binary in Products..."
+              FALLBACK_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -size +500k 2>/dev/null | head -n 1)
+              if [ -n "$FALLBACK_BIN" ]; then
+                cp -f "$FALLBACK_BIN" "Payload/Runner.app/Runner"
+              fi
+            fi
+          fi
+
+          # 4. 바이너리 실행 권한 부여 및 확인
           chmod 755 "Payload/Runner.app/Runner" || true
+          file "Payload/Runner.app/Runner" || true
+          ls -lh "Payload/Runner.app/Runner" || true
+
+          # 5. 불필요 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
+          # 6. ZIP 압축
           zip -r -q Violet.ipa Payload
+
+          echo "=== Final IPA File Details ==="
           ls -lh Violet.ipa
+
+          IPA_SIZE=$(stat -f%z Violet.ipa 2>/dev/null || stat -c%s Violet.ipa 2>/dev/null || echo 0)
+          echo "Final IPA Size in bytes: $IPA_SIZE"
+
+          if [ "$IPA_SIZE" -lt 10000000 ]; then
+            echo "::error::Violet.ipa is smaller than 10MB! ($IPA_SIZE bytes)"
+            exit 1
+          fi
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
