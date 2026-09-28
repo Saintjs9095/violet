@@ -48,7 +48,7 @@ jobs:
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
 
-            # ShareExtension 타깃 삭제
+            # ShareExtension 타깃 완전 삭제
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
             if share_target
               puts "Removing ShareExtension target..."
@@ -87,6 +87,8 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
+          # Flutter 및 Xcode 컴파일 실행 (산출물 SYMROOT를 RUNNER_TEMP/build_out으로 직접 고정)
+          mkdir -p "$RUNNER_TEMP/build_out"
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
@@ -94,18 +96,30 @@ jobs:
           echo "=== Locating compiled Application Bundle ==="
           APP_PATH=""
 
-          # 1. Info.plist가 실존하는 모든 .app 디렉터리 탐색
+          # 1. 릴리즈 빌드 폴더 내 모든 .app 번들 실시간 탐색 (삼중 경로 제거)
           while IFS= read -r candidate; do
-            if [ -f "$candidate/Info.plist" ]; then
+            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
               APP_PATH="$candidate"
-              echo "Discovered app candidate: $APP_PATH"
+              echo "Discovered verified bundle at: $APP_PATH"
               break
             fi
-          done < <(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos")
+          done < <(find /Users/runner/work -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos")
+
+          # 2. DerivedData 전체 탐색 (폴백)
+          if [ -z "$APP_PATH" ]; then
+            echo "Searching DerivedData..."
+            while IFS= read -r candidate; do
+              if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
+                APP_PATH="$candidate"
+                echo "Discovered bundle in DerivedData: $APP_PATH"
+                break
+              fi
+            done < <(find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos")
+          fi
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::No compiled .app bundle found!"
-            find "$GITHUB_WORKSPACE/violet/build" -ls || true
+            echo "::error::Compiled Application bundle could not be found!"
+            find /Users/runner/work -name "Info.plist" || true
             exit 1
           fi
 
