@@ -40,22 +40,22 @@ jobs:
       - name: Decouple ShareExtension and Set Ad-Hoc Signing
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 제거
+          # 1. Podfile에서 ShareExtension 타깃 안전 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 ShareExtension 제거 및 Ad-Hoc('-') 링크 서명 적용
+          # 2. Ruby xcodeproj로 ShareExtension 제거 및 Ad-Hoc('-') 서명 적용
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
 
-            # ShareExtension 타깃 완전 삭제
+            # ShareExtension 타깃 삭제
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
             if share_target
               puts "Removing ShareExtension target..."
               share_target.remove_from_project
             end
 
-            # Runner 타깃 의존성 및 Embed 확장 빌드 페이즈 제거
+            # Runner 타깃 의존성 및 Embed 확장 정리
             runner_target = project.targets.find { |t| t.name == "Runner" }
             if runner_target
               runner_target.dependencies.delete_if do |dep|
@@ -66,7 +66,7 @@ jobs:
               end
             end
 
-            # 메인 Runner 타깃이 바이너리를 정상 링크하도록 Ad-Hoc 서명 주입
+            # Runner 타깃에 Ad-Hoc 서명 설정 주입
             project.targets.each do |target|
               target.build_configurations.each do |config|
                 config.build_settings["CODE_SIGN_STYLE"] = "Manual"
@@ -79,7 +79,7 @@ jobs:
             end
 
             project.save
-            puts "Project configured for Ad-Hoc signed executable linking!"
+            puts "Project configured successfully!"
           '
 
       - name: Build Unsigned Release App Bundle
@@ -87,7 +87,6 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Ad-Hoc 서명으로 유료 계정 검증 없이 최종 Runner 바이너리까지 완벽 링크
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
@@ -95,22 +94,23 @@ jobs:
           echo "=== Locating compiled Application Bundle ==="
           APP_PATH=""
 
-          # 1. 릴리즈 빌드 디렉터리 및 DerivedData에서 실제 바이너리가 링크된 Runner.app 탐색
+          # 1. Info.plist가 실존하는 모든 .app 디렉터리 탐색
           while IFS= read -r candidate; do
-            if [ -f "$candidate/Info.plist" ] && [ -f "$candidate/Runner" ]; then
+            if [ -f "$candidate/Info.plist" ]; then
               APP_PATH="$candidate"
+              echo "Discovered app candidate: $APP_PATH"
               break
             fi
-          done < <(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos")
+          done < <(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos")
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Compiled Runner.app with binary could not be found!"
-            find "$GITHUB_WORKSPACE/violet/build" -name "Runner" -ls || true
+            echo "::error::No compiled .app bundle found!"
+            find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -lh "$APP_PATH/Runner"
+          ls -la "$APP_PATH"
 
           # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
