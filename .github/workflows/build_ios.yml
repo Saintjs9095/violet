@@ -37,69 +37,93 @@ jobs:
         working-directory: violet
         run: flutter pub get
 
-      - name: Clean Podfile and Inject Ad-Hoc Signing
+      - name: Decouple ShareExtension and Configure Signing
         working-directory: violet/ios
         run: |
-          # 1. Podfile에서 ShareExtension 타깃 블록 안전 삭제
+          # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. 유료 개발팀 검증을 우회하는 Ad-Hoc("-" 서명) 및 수동 서명 강제 적용
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGN_STYLE = Manual" >> "$cfg"
-            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
-            echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
-            echo "EXPANDED_CODE_SIGN_IDENTITY = -" >> "$cfg"
-            echo "PROVISIONING_PROFILE_SPECIFIER = " >> "$cfg"
-            echo "DEVELOPMENT_TEAM = " >> "$cfg"
-          done
+          # 2. Ruby xcodeproj를 사용하여 pbxproj 손상 없이 ShareExtension 완벽 제거 및 무서명 설정
+          ruby -r xcodeproj -e '
+            project = Xcodeproj::Project.open("Runner.xcodeproj")
+
+            # ShareExtension 타깃 완전 삭제
+            share_target = project.targets.find { |t| t.name == "ShareExtension" }
+            if share_target
+              puts "Removing ShareExtension target..."
+              share_target.remove_from_project
+            end
+
+            # Runner 타깃의 Dependencies 및 Embed Extension 빌드 페이즈에서 제거
+            runner_target = project.targets.find { |t| t.name == "Runner" }
+            if runner_target
+              runner_target.dependencies.delete_if do |dep|
+                dep.target.nil? || dep.target.name == "ShareExtension" || (dep.respond_to?(:display_name) && dep.display_name.include?("ShareExtension"))
+              end
+              runner_target.build_phases.delete_if do |phase|
+                phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name == "Embed Foundation Extensions"
+              end
+            end
+
+            # 프로젝트 전체 빌드 구성에 서명 비활성화 및 더미 팀 주입
+            (project.targets + [project]).each do |item|
+              item.build_configurations.each do |config|
+                config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                config.build_settings["CODE_SIGN_IDENTITY"] = ""
+                config.build_settings["CODE_SIGN_STYLE"] = "Manual"
+                config.build_settings["DEVELOPMENT_TEAM"] = "ABCD1234EF"
+                config.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = ""
+              end
+            end
+
+            project.save
+            puts "Project successfully reconfigured without ShareExtension!"
+          '
 
       - name: Build Unsigned Release App Bundle
         working-directory: violet
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Ad-Hoc 서명 설정을 통해 유료 계정 에러 없이 5~6분간 완전한 AOT 릴리즈 바이너리 컴파일 완주
+          # ShareExtension 간섭 없이 Runner 메인 앱 단독으로 전체 릴리즈 컴파일
           flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app in Release-iphoneos ==="
+          echo "=== Locating compiled Application Bundle ==="
           APP_PATH=""
 
-          # 1. 표준 산출물 경로 확인
-          if [ -d "$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app" ]; then
-            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/Release-iphoneos/Runner.app"
-          elif [ -d "$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app" ]; then
-            APP_PATH="$GITHUB_WORKSPACE/violet/build/ios/iphoneos/Runner.app"
-          fi
-
-          # 2. DerivedData 전체 탐색 (바이너리가 실존하는 디렉터리 탐색)
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "Searching all candidates for Runner executable..."
-            FOUND_BIN=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 2>/dev/null | grep -E "Release-iphoneos/Runner.app/Runner" | head -n 1)
-            if [ -n "$FOUND_BIN" ]; then
-              APP_PATH=$(dirname "$FOUND_BIN")
+          # 1. build 디렉터리 및 DerivedData에서 실제 Info.plist가 포함된 .app 탐색
+          while IFS= read -r candidate; do
+            if [ -f "$candidate/Info.plist" ]; then
+              APP_PATH="$candidate"
+              break
             fi
-          fi
+          done < <(find "$GITHUB_WORKSPACE/violet/build" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" 2>/dev/null | grep -E "Release-iphoneos|iphoneos")
 
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/Runner" ]; then
-            echo "::error::Compiled executable Runner binary could not be found!"
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Compiled Application bundle could not be found!"
             find "$GITHUB_WORKSPACE/violet/build" -ls || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
-          ls -lh "$APP_PATH/Runner"
+          ls -la "$APP_PATH"
 
-          # SideStore 표준 Payload 구성
+          # 실행 파일 이름 확인 (Runner 또는 프로젝트명 바이너리)
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" 2>/dev/null || echo "Runner")
+          echo "Main Executable Name: $EXEC_NAME"
+          ls -lh "$APP_PATH/$EXEC_NAME"
+
+          # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
 
-          # 잔여 플러그인 폴더 제거
-          rm -rf Payload/Runner.app/PlugIns || true
+          # 잔여 플러그인 확장 폴더 제거
+          rm -rf Payload/*.app/PlugIns || true
 
           # ZIP 압축
           zip -r -q Violet.ipa Payload
