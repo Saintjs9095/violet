@@ -115,23 +115,20 @@ jobs:
             echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
           done
 
-      - name: Precompile Flutter Dart AOT Engine
-        working-directory: ${{ steps.locate.outputs.proj_dir }}
-        run: |
-          # Flutter 공식 assemble에 output 디렉터리를 명시하여 App.framework 및 Flutter.framework 사전 완비
-          mkdir -p ios/Flutter/App.framework
-          flutter assemble -dTargetPlatform=ios -dBuildMode=release -o ios/Flutter release_unpack_ios
-
       - name: Build Runner App with Native Xcodebuild
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+
+          # Xcodebuild 실행 시 SdkRoot와 Flutter 엔진 빌드 트리거를 환경변수로 직접 주입
           xcodebuild build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -destination 'generic/platform=iOS' \
+            SDKROOT="$SDK_PATH" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=YES \
@@ -141,34 +138,28 @@ jobs:
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Application Bundle ==="
-          APP_PATH=""
+          PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
-          # Runner 바이너리가 완벽히 링크된 Runner.app 탐색
-          while IFS= read -r candidate; do
-            if [ -d "$candidate" ] && [ -f "$candidate/Runner" ]; then
-              APP_PATH="$candidate"
-              echo "Discovered full bundle with Mach-O binary at: $APP_PATH"
-              break
-            fi
-          done < <(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
+          TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
 
-          if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
+            echo "Fallback searching for any Runner.app..."
+            TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
             echo "::error::Target Runner.app directory could not be located!"
             exit 1
           fi
 
-          echo "Target App Path: $APP_PATH"
-          ls -la "$APP_PATH"
+          echo "Target App Path: $TARGET_APP"
+          ls -la "$TARGET_APP"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
+          cp -R "$TARGET_APP" Payload/
 
-          # Info.plist 템플릿 변수 실값 완전 치환
+          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 필수)
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ -f "$PLIST_PATH" ]; then
             sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
@@ -178,11 +169,12 @@ jobs:
             sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
           fi
 
+          # 실행 파일 권한 부여 및 확인
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
           file "Payload/Runner.app/Runner" || true
           ls -lh "Payload/Runner.app/Runner" || true
 
-          # 잔여 플러그인 확장 제거
+          # 잔여 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
