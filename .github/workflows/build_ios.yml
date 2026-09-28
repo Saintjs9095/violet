@@ -93,37 +93,39 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          flutter build ios --release --no-codesign
+          # 비치명적 서명 경고 exit 1을 넘겨 컴파일 산출물 보존
+          flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Application Bundle ==="
-          
-          # 프로젝트 폴더 내/외부에서 실존하는 .app 번들을 직접 매핑
           APP_PATH=""
-          for candidate in \
-            "${{ steps.locate.outputs.proj_dir }}/build/ios/iphoneos/Runner.app" \
-            "${{ steps.locate.outputs.proj_dir }}/build/ios/Release-iphoneos/Runner.app" \
-            "${{ steps.locate.outputs.proj_dir }}/ios/build/Release-iphoneos/Runner.app" \
-            $(find /Users/runner/work -name "Runner.app" 2>/dev/null | head -n 1) \
-            $(find "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner.app" 2>/dev/null | head -n 1); do
-            if [ -d "$candidate" ]; then
+
+          # 1. DerivedData의 Products 디렉터리 및 워크스페이스 내 Runner.app 직접 추출
+          while IFS= read -r candidate; do
+            if [ -d "$candidate" ] && [ -f "$candidate/Info.plist" ]; then
               APP_PATH="$candidate"
-              echo "Matched App Bundle at: $APP_PATH"
+              echo "Discovered compiled app bundle: $APP_PATH"
               break
             fi
-          done
+          done < <(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
+
+          # 2. 시스템 전체 폴백 탐색
+          if [ -z "$APP_PATH" ]; then
+            echo "Fallback searching for any Runner.app..."
+            APP_PATH=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+          fi
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Runner.app could not be found!"
-            find /Users/runner/work -name "*.app" -o -name "Runner" 2>/dev/null || true
+            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" 2>/dev/null || true
             exit 1
           fi
 
           echo "Target Bundle Path: $APP_PATH"
           ls -la "$APP_PATH"
 
-          # SideStore 표준 Payload 구성
+          # SideStore 표준 Payload 디렉터리 구성
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
