@@ -51,29 +51,25 @@ jobs:
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj 정식 API를 통해서만 안전하게 타깃 및 충돌 빌드 페이즈 제거
+          # 2. Ruby xcodeproj로 타깃 의존성 정리 및 Crashlytics 무력화
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
 
-            # ShareExtension 타깃 객체 안전 삭제
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
             share_target.remove_from_project if share_target
 
             runner_target = project.targets.find { |t| t.name == "Runner" }
             if runner_target
-              # ShareExtension 관련 타깃 의존성 제거
               runner_target.dependencies.delete_if do |dep|
                 dep.target.nil? || dep.target.name == "ShareExtension" || (dep.respond_to?(:display_name) && dep.display_name.to_s.include?("ShareExtension"))
               end
 
-              # Crashlytics 및 Extension 빌드 페이즈 안전 삭제
               runner_target.build_phases.delete_if do |phase|
                 (phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension")) ||
                 (phase.respond_to?(:name) && phase.name.to_s.include?("Crashlytics")) ||
                 (phase.respond_to?(:shell_script) && phase.shell_script.to_s.include?("crashlytics"))
               end
 
-              # Ad-Hoc 서명 설정
               runner_target.build_configurations.each do |config|
                 config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
                 config.build_settings["CODE_SIGN_STYLE"] = "Manual"
@@ -88,7 +84,6 @@ jobs:
             end
 
             project.save
-            puts "Runner.xcodeproj cleaned and saved without syntax errors!"
           '
 
           # 3. xcscheme에서 ShareExtension 제거
@@ -120,58 +115,70 @@ jobs:
             echo "CODE_SIGNING_ALLOWED = YES" >> "$cfg"
           done
 
-      - name: Build Flutter iOS App Bundle
+      - name: Precompile Flutter Dart AOT Assets
         working-directory: ${{ steps.locate.outputs.proj_dir }}
+        run: |
+          # Dart AOT 엔진 및 App.framework 사전 생성 (xcodebuild 실패 방지)
+          flutter assemble -dTargetPlatform=ios -dBuildMode=release release_unpack_ios
+
+      - name: Build Runner App with Native Xcodebuild
+        working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          flutter build ios --release --no-codesign || true
+          # Flutter CLI 삭제 루틴 없이 xcodebuild로 직접 Mach-O 바이너리 및 번들 완성
+          xcodebuild build \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="7QZ8ABC99X" \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package Payload into SideStore IPA
         run: |
           echo "=== Locating compiled Application Bundle ==="
-          PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
+          APP_PATH=""
 
-          TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
-          if [ ! -d "$TARGET_APP" ]; then
-            TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          # DerivedData 및 워크스페이스 내에서 Runner 실행 파일이 실존하는 Runner.app 탐색
+          while IFS= read -r candidate; do
+            if [ -d "$candidate" ] && [ -f "$candidate/Runner" ]; then
+              APP_PATH="$candidate"
+              echo "Discovered full bundle with binary at: $APP_PATH"
+              break
+            fi
+          done < <(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos")
+
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | head -n 1)
           fi
 
-          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "::error::Target Runner.app directory could not be located!"
-            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 5 -name "*.app" -ls || true
             exit 1
           fi
 
-          echo "Target App Path: $TARGET_APP"
-          ls -la "$TARGET_APP"
+          echo "Target App Path: $APP_PATH"
+          ls -la "$APP_PATH"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
-          cp -R "$TARGET_APP" Payload/
+          cp -R "$APP_PATH" Payload/
 
-          # Info.plist 템플릿 변수 실값 치환
+          # Info.plist 템플릿 변수 치환
           PLIST_PATH="Payload/Runner.app/Info.plist"
-          if [ ! -f "$PLIST_PATH" ]; then
-            cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
+          if [ -f "$PLIST_PATH" ]; then
+            sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
+            sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
+            sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
+            sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
+            sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
           fi
 
-          sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
-          sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
-          sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
-          sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
-          sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
-
-          # 컴파일된 바이너리 주입 및 권한 부여
-          if [ ! -f "Payload/Runner.app/Runner" ]; then
-            echo "Searching compiled Runner binary in disk..."
-            FOUND_BIN=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-            if [ -n "$FOUND_BIN" ]; then
-              echo "Injecting compiled binary from: $FOUND_BIN"
-              cp -f "$FOUND_BIN" "Payload/Runner.app/Runner"
-            fi
-          fi
-
+          # 바이너리 권한 부여 및 확인
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
           file "Payload/Runner.app/Runner" || true
           ls -lh "Payload/Runner.app/Runner" || true
