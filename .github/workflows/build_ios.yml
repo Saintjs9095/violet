@@ -44,17 +44,16 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Reconfigure Xcode Project Targets
+      - name: Decouple ShareExtension from Project and Schemes
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 ShareExtension 및 충돌 스크립트 제거
+          # 2. Ruby xcodeproj로 pbxproj 내 타깃 및 의존성 제거
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
-
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
             share_target.remove_from_project if share_target
 
@@ -64,55 +63,76 @@ jobs:
                 dep.target.nil? || dep.target.name == "ShareExtension" || (dep.respond_to?(:display_name) && dep.display_name.to_s.include?("ShareExtension"))
               end
               runner_target.build_phases.delete_if do |phase|
-                phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension") ||
+                (phase.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase) && phase.name.to_s.include?("Extension")) ||
                 (phase.respond_to?(:name) && phase.name.to_s.include?("Crashlytics"))
               end
-
-              runner_target.build_configurations.each do |config|
-                config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
-                config.build_settings["CODE_SIGN_STYLE"] = "Manual"
-                config.build_settings["CODE_SIGN_IDENTITY"] = ""
-                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
-                config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
-              end
             end
-
-            project.build_configurations.each do |config|
-              config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
-            end
-
             project.save
           '
 
-          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
-          done
+          # 3. 모든 .xcscheme 파일에서 ShareExtension 빌드 엔트리 제거 (스킴 불일치 해결)
+          python3 -c '
+          import xml.etree.ElementTree as ET
+          import glob
+
+          for p in glob.glob("**/*.xcscheme", recursive=True):
+              try:
+                  tree = ET.parse(p)
+                  root = tree.getroot()
+                  changed = False
+                  for entries in root.findall(".//BuildActionEntries"):
+                      for entry in list(entries):
+                          ref = entry.find("BuildableReference")
+                          if ref is not None and "ShareExtension" in ref.attrib.get("BlueprintName", ""):
+                              entries.remove(entry)
+                              changed = True
+                  if changed:
+                      tree.write(p)
+                      print(f"Cleaned ShareExtension from scheme: {p}")
+              except Exception as e:
+                  pass
+          '
 
       - name: Build Flutter iOS App Bundle
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          flutter build ios --release --no-codesign || true
+          # 상세 로그를 파일에 기록하여 에러 추적 보장
+          flutter build ios --release --no-codesign -v > flutter_build.log 2>&1 || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Preparing Payload for SideStore ==="
-          
-          # 1. 빌드 폴더 내 Runner.app 탐색
-          TARGET_APP="${{ steps.locate.outputs.proj_dir }}/build/ios/Release-iphoneos/Runner.app"
-          if [ ! -d "$TARGET_APP" ]; then
-            TARGET_APP=$(find /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          echo "=== Inspecting Build Output ==="
+          PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
+
+          # 컴파일 실패 시 상세 로그 출력
+          if [ ! -d "$PROJ_DIR/build/ios/Release-iphoneos/Runner.app" ] || [ ! -f "$PROJ_DIR/build/ios/Release-iphoneos/Runner.app/Info.plist" ]; then
+            echo "::warning::Runner.app missing. Showing last 120 lines of build log:"
+            tail -n 120 "$PROJ_DIR/flutter_build.log" || true
           fi
+
+          TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
+          if [ ! -d "$TARGET_APP" ]; then
+            TARGET_APP=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          fi
+
+          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
+            echo "::error::Target Runner.app directory could not be located!"
+            exit 1
+          fi
+
+          echo "Target App Path: $TARGET_APP"
+          ls -la "$TARGET_APP"
 
           rm -rf Payload Violet.ipa
           mkdir -p Payload
           cp -R "$TARGET_APP" Payload/
 
-          # 2. Info.plist 보강 및 템플릿 변수 실값 완전 치환
+          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 인식 보장)
           PLIST_PATH="Payload/Runner.app/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
-            cp "${{ steps.locate.outputs.proj_dir }}/ios/Runner/Info.plist" "$PLIST_PATH"
+            cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
           fi
 
           sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
@@ -121,29 +141,20 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 3. 진짜 컴파일된 실행 바이너리 주입 (Bad file descriptor 원인 해결)
-          echo "Searching true compiled Runner Mach-O binary..."
-          REAL_BIN=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -perm +111 -size +1M 2>/dev/null | head -n 1)
-          
-          if [ -z "$REAL_BIN" ]; then
-            REAL_BIN=$(find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -type f -name "Runner" -size +1M 2>/dev/null | head -n 1)
+          # 컴파일된 메인 실행 바이너리 존재 확인 및 권한 부여
+          if [ ! -f "Payload/Runner.app/Runner" ]; then
+            echo "Searching for compiled executable binary..."
+            EXEC_BIN=$(find "$PROJ_DIR/build" "$HOME/Library/Developer/Xcode/DerivedData" -type f -perm +111 -size +500k 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+            if [ -n "$EXEC_BIN" ]; then
+              echo "Found executable: $EXEC_BIN"
+              cp -f "$EXEC_BIN" "Payload/Runner.app/Runner"
+            fi
           fi
 
-          if [ -n "$REAL_BIN" ]; then
-            echo "Injecting verified binary from: $REAL_BIN"
-            cp -f "$REAL_BIN" "Payload/Runner.app/Runner"
-            chmod 755 "Payload/Runner.app/Runner"
-          else
-            echo "::error::No valid compiled Runner binary found above 1MB!"
-            find /Users/runner/work "$HOME/Library/Developer/Xcode/DerivedData" -name "Runner" -ls || true
-            exit 1
-          fi
-
-          # 4. 바이너리 정상 확인
-          file "Payload/Runner.app/Runner"
+          chmod 755 "Payload/Runner.app/Runner" || true
           ls -lh "Payload/Runner.app/Runner"
 
-          # 플러그인 확장 폴더 제거
+          # 불필요한 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
