@@ -71,16 +71,16 @@ jobs:
               end
 
               runner_target.build_configurations.each do |config|
-                config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
-                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
+                config.build_settings["CODE_SIGN_STYLE"] = "Manual"
                 config.build_settings["CODE_SIGN_IDENTITY"] = ""
+                config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
               end
             end
 
             project.build_configurations.each do |config|
-              config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
-              config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
-              config.build_settings["CODE_SIGN_IDENTITY"] = ""
+              config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
             end
 
             project.save
@@ -108,75 +108,78 @@ jobs:
                   pass
           '
 
-          # 4. xcconfig 필수 서명 해제 및 플러터 릴리즈 환경 고정
           for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
-            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
-            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
             echo "CODE_SIGN_IDENTITY =" >> "$cfg"
+            echo "CODE_SIGNING_REQUIRED = NO" >> "$cfg"
+            echo "CODE_SIGNING_ALLOWED = NO" >> "$cfg"
           done
 
-      - name: Build Runner App with Native Xcodebuild
-        working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
+      - name: Build Flutter iOS App with Bundle Preservation Watcher
+        working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # Flutter 릴리즈 백엔드 스크립트 실행에 필요한 환경변수 완전 로드
-          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/SavedRunner.app"
+
+          # 백그라운드 Watcher: 컴파일된 Runner 바이너리와 번들이 생성되는 즉시 보존 복사
+          (
+            while true; do
+              FOUND_APP=$(find build/ios/Release-iphoneos "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+              if [ -n "$FOUND_APP" ] && [ -f "$FOUND_APP/Info.plist" ]; then
+                cp -R "$FOUND_APP/"* "$RUNNER_TEMP/SavedRunner.app/" 2>/dev/null || true
+              fi
+              sleep 2
+            done
+          ) &
+          WATCHER_PID=$!
+
+          # 5분 동안 온전한 Dart AOT + Swift 컴파일 수행
+          flutter build ios --release --no-codesign || true
+
+          # 빌드 완료 후 Watcher 종료 및 최종 동기화
+          kill $WATCHER_PID 2>/dev/null || true
           
-          # flutter build로 xcconfig 및 엔진 환경 최신화
-          cd ..
-          flutter build ios --config-only --release --no-codesign
-          cd ios
-
-          xcodebuild build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            FLUTTER_BUILD_MODE="release" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 | tee xcodebuild.log | grep -E "(error:|fatal error:|\(2 failures\)|FAILED|PhaseScriptExecution)" || true
-
-          if grep -q "The following build commands failed" xcodebuild.log || grep -q "(2 failures)" xcodebuild.log; then
-            echo "::error::=== Script Failure Details ==="
-            grep -B 3 -A 10 "PhaseScriptExecution" xcodebuild.log || true
-            exit 1
+          # 빌드 직후 산출물 최종 보존
+          FOUND_APP=$(find build/ios/Release-iphoneos "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
+          if [ -n "$FOUND_APP" ]; then
+            cp -R "$FOUND_APP/"* "$RUNNER_TEMP/SavedRunner.app/" 2>/dev/null || true
           fi
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Application Bundle ==="
+          echo "=== Inspecting Saved App Bundle ==="
           PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
-          TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" "$PROJ_DIR" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | grep -E "Release-iphoneos" | head -n 1)
-
-          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
-            TARGET_APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" /Users/runner/work -type d -name "Runner.app" 2>/dev/null | head -n 1)
-          fi
-
-          if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
-            echo "::error::Target Runner.app directory could not be located!"
-            exit 1
+          TARGET_APP="$RUNNER_TEMP/SavedRunner.app"
+          
+          # 보존된 폴더가 비어있을 경우 프로젝트 경로 확인
+          if [ ! -f "$TARGET_APP/Info.plist" ]; then
+            echo "Checking fallback locations..."
+            FALLBACK_APP=$(find "$PROJ_DIR/build/ios/Release-iphoneos" "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "Runner.app" 2>/dev/null | head -n 1)
+            if [ -n "$FALLBACK_APP" ]; then
+              TARGET_APP="$FALLBACK_APP"
+            fi
           fi
 
           echo "Target App Path: $TARGET_APP"
           ls -la "$TARGET_APP"
 
           rm -rf Payload Violet.ipa
-          mkdir -p Payload
-          cp -R "$TARGET_APP" Payload/
+          mkdir -p Payload/Runner.app
+          cp -R "$TARGET_APP/"* Payload/Runner.app/
 
-          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 인식 보장)
+          # Info.plist 템플릿 변수 실값 완전 치환 (SideStore 필수)
           PLIST_PATH="Payload/Runner.app/Info.plist"
-          if [ -f "$PLIST_PATH" ]; then
-            sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
-            sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
-            sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
-            sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
-            sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
+          if [ ! -f "$PLIST_PATH" ]; then
+            cp "$PROJ_DIR/ios/Runner/Info.plist" "$PLIST_PATH"
           fi
+
+          sed -i '' 's/\$(EXECUTABLE_NAME)/Runner/g' "$PLIST_PATH"
+          sed -i '' 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/xyz.project.violet/g' "$PLIST_PATH"
+          sed -i '' 's/\$(PRODUCT_NAME)/Violet/g' "$PLIST_PATH"
+          sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
+          sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
           # 실행 파일 권한 부여 및 확인
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
