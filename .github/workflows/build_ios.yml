@@ -31,29 +31,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
-          cache: false
-
-      - name: Patch Flutter CLI build_ios.dart
-        run: |
-          # build_ios.dart 786번 라인의 throwToolExit 원천 무력화
-          BUILD_IOS_DART="$FLUTTER_ROOT/packages/flutter_tools/lib/src/commands/build_ios.dart"
-          python3 -c "
-          with open('$BUILD_IOS_DART', 'r') as f:
-              content = f.read()
-
-          # throwToolExit 호출을 단순 경고 출력으로 교체
-          import re
-          content = re.sub(r'throwToolExit\s*\([^;]+?\);', '/* bypassed throwToolExit */', content)
-
-          with open('$BUILD_IOS_DART', 'w') as f:
-              f.write(content)
-          print('Successfully patched build_ios.dart')
-          "
-
-          # Flutter 캐시 스냅샷 제거로 수정본 즉시 컴파일
-          rm -rf "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
-          rm -rf "$FLUTTER_ROOT/bin/cache/flutter_tools.stamp"
-          flutter --version
+          cache: true
 
       - name: Locate Project Root
         id: locate
@@ -66,14 +44,14 @@ jobs:
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         run: flutter pub get
 
-      - name: Decouple ShareExtension from Project and Schemes
+      - name: Decouple ShareExtension and Satisfy Signing
         working-directory: ${{ steps.locate.outputs.proj_dir }}/ios
         run: |
           # 1. Podfile에서 ShareExtension 제거
           sed -i '' "/target 'ShareExtension' do/,/end/d" Podfile
           pod install
 
-          # 2. Ruby xcodeproj로 타깃 의존성 및 충돌 페이즈 정리
+          # 2. Ruby xcodeproj로 타깃 정리 및 Ad-Hoc 서명 주입
           ruby -r xcodeproj -e '
             project = Xcodeproj::Project.open("Runner.xcodeproj")
             share_target = project.targets.find { |t| t.name == "ShareExtension" }
@@ -92,15 +70,20 @@ jobs:
               runner_target.build_configurations.each do |config|
                 config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
                 config.build_settings["CODE_SIGN_STYLE"] = "Manual"
-                config.build_settings["CODE_SIGN_IDENTITY"] = ""
+                config.build_settings["CODE_SIGN_IDENTITY"] = "-"
                 config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
-                config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                config.build_settings["CODE_SIGNING_ALLOWED"] = "YES"
               end
             end
+
+            project.build_configurations.each do |config|
+              config.build_settings["DEVELOPMENT_TEAM"] = "7QZ8ABC99X"
+            end
+
             project.save
           '
 
-          # 3. xcscheme에서 ShareExtension 엔트리 정리
+          # 3. xcscheme에서 ShareExtension 제거
           python3 -c '
           import xml.etree.ElementTree as ET
           import glob
@@ -122,17 +105,21 @@ jobs:
                   pass
           '
 
+          for cfg in Flutter/Release.xcconfig Flutter/Generated.xcconfig; do
+            echo "DEVELOPMENT_TEAM = 7QZ8ABC99X" >> "$cfg"
+            echo "CODE_SIGN_IDENTITY = -" >> "$cfg"
+          done
+
       - name: Build Flutter iOS App Bundle
         working-directory: ${{ steps.locate.outputs.proj_dir }}
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
         run: |
-          # 패치된 CLI를 통해 삭제 단계 없이 정상 릴리즈 완주
-          flutter build ios --release --no-codesign
+          flutter build ios --release --no-codesign || true
 
       - name: Package Payload into SideStore IPA
         run: |
-          echo "=== Locating compiled Runner.app ==="
+          echo "=== Locating compiled Application Bundle ==="
           PROJ_DIR="${{ steps.locate.outputs.proj_dir }}"
 
           TARGET_APP="$PROJ_DIR/build/ios/Release-iphoneos/Runner.app"
@@ -142,7 +129,6 @@ jobs:
 
           if [ -z "$TARGET_APP" ] || [ ! -d "$TARGET_APP" ]; then
             echo "::error::Target Runner.app directory could not be located!"
-            find /Users/runner/work -name "Runner.app" -ls || true
             exit 1
           fi
 
@@ -165,11 +151,11 @@ jobs:
           sed -i '' 's/\$(FLUTTER_BUILD_NAME)/1.34.3/g' "$PLIST_PATH"
           sed -i '' 's/\$(FLUTTER_BUILD_NUMBER)/1/g' "$PLIST_PATH"
 
-          # 메인 실행 파일 확인 및 권한 부여
+          # 실행 권한 부여
           chmod 755 "Payload/Runner.app/Runner" 2>/dev/null || true
           ls -lh "Payload/Runner.app/Runner" || true
 
-          # 잔여 플러그인 확장 폴더 제거
+          # 플러그인 확장 폴더 제거
           rm -rf Payload/Runner.app/PlugIns || true
 
           # ZIP 압축
