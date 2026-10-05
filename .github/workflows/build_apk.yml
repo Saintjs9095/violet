@@ -25,11 +25,10 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - - name: Set up Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
-          channel: 'stable'
           cache: true
 
       - name: Set up Rust
