@@ -204,9 +204,17 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
         await Settings.useChunkSync.setValue(false);
       }
       if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
-  await decompress7Z(
+        final targetDest = Platform.isAndroid
+            ? '${dir.path}/data'
+            : (Platform.isIOS || Platform.isMacOS)
+                ? await getDatabasesPath()
+                : dir.path;
+
+        await Directory(targetDest).create(recursive: true);
+
+        await decompress7Z(
           src: '${dir.path}/db.sql.7z',
-          dest: Platform.isAndroid ? '${dir.path}/data' : dir.path,
+          dest: targetDest,
         );
         await File('${dir.path}/db.sql.7z').delete();
         await Settings.useChunkSync.setValue(true);
