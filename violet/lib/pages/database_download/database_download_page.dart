@@ -164,7 +164,7 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
           tnu = 0;
         }),
       );
-      if (widget.dbType! == 'global') {
+      if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
         await dio.download(
           SyncManager.getLatestDB().getDBDownloadUrl(widget.dbType!),
           '${dir.path}/db.sql.7z',
@@ -203,8 +203,8 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
         await createDummy();
         await Settings.useChunkSync.setValue(false);
       }
-      if (widget.dbType! == 'global') {
-        await decompress7Z(
+      if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
+  await decompress7Z(
           src: '${dir.path}/db.sql.7z',
           dest: Platform.isAndroid ? '${dir.path}/data' : dir.path,
         );
@@ -215,9 +215,9 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('db_exists', 1);
       await prefs.setString('databasetype', widget.dbType!);
-      if (widget.dbType! == 'global') {
-        await prefs.setString(
-          'databasesync',
+      if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
+  await prefs.setString(
+    'databasesync',
           SyncManager.getLatestDB().getDateTime().toString(),
         );
         await prefs.setInt('synclatest', SyncManager.getLatestDB().timestamp);
