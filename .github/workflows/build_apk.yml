@@ -39,26 +39,19 @@ jobs:
       - name: Install Cargo NDK
         run: cargo install cargo-ndk
 
-      - name: Locate Project Root
-        id: locate
-        run: |
-          PROJ_DIR=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name "pubspec.yaml" -exec dirname {} \; | head -n 1)
-          echo "Project directory is: $PROJ_DIR"
-          echo "proj_dir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
-
       - name: Install Dependencies
-        working-directory: ${{ steps.locate.outputs.proj_dir }}
+        working-directory: violet
         run: flutter pub get
 
       - name: Patch Server Endpoint to Custom VM
-        working-directory: ${{ steps.locate.outputs.proj_dir }}
+        working-directory: violet
         run: |
           find lib/ -type f -name "*.dart" -exec sed -i 's|https://koromo.xyz|http://129.225.133.125|g' {} +
           find lib/ -type f -name "*.dart" -exec sed -i 's|http://koromo.xyz|http://129.225.133.125|g' {} +
           find lib/server/ -type f -name "*.dart" -exec sed -i 's|api.projectviolet.org|129.225.133.125|g' {} + 2>/dev/null || true
 
       - name: Mock Missing Salt Files
-        working-directory: ${{ steps.locate.outputs.proj_dir }}
+        working-directory: violet
         run: |
           mkdir -p lib/server
 
@@ -85,11 +78,11 @@ jobs:
           echo "Successfully injected salt.dart and wsalt.dart"
 
       - name: Build APK (Release)
-        working-directory: ${{ steps.locate.outputs.proj_dir }}
+        working-directory: violet
         run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: violet-apk-release
-          path: ${{ steps.locate.outputs.proj_dir }}/build/app/outputs/flutter-apk/app-release.apk
+          path: violet/build/app/outputs/flutter-apk/app-release.apk
