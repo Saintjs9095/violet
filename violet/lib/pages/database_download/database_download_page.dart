@@ -116,7 +116,13 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
   Future<void> downloadFile() async {
     try {
       await downloadFileWith('latest', true);
-    } catch (e) {
+    } catch (e, st) {
+      Fluttertoast.showToast(
+        msg: '1차 에러: $e',
+        toastLength: Toast.LENGTH_LONG,
+        gravity: ToastGravity.BOTTOM,
+      );
+      print('[DBDownload-Debug] $e\n$st');
       await downloadFileWith('old', false);
     }
   }
