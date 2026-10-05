@@ -204,19 +204,28 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
         await Settings.useChunkSync.setValue(false);
       }
       if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
-        final targetDest = Platform.isAndroid
-            ? '${dir.path}/data'
-            : (Platform.isIOS || Platform.isMacOS)
-                ? await getDatabasesPath()
-                : dir.path;
+        final docDir = await getApplicationDocumentsDirectory();
+        final dbDir = (Platform.isIOS || Platform.isMacOS)
+            ? await getDatabasesPath()
+            : '${docDir.path}/data';
 
-        await Directory(targetDest).create(recursive: true);
+        await Directory(dbDir).create(recursive: true);
+        await Directory('${docDir.path}/data').create(recursive: true);
 
         await decompress7Z(
           src: '${dir.path}/db.sql.7z',
-          dest: targetDest,
+          dest: dbDir,
         );
         await File('${dir.path}/db.sql.7z').delete();
+
+        final extractedDb = File('$dbDir/data.db');
+        if (await extractedDb.exists()) {
+          try {
+            await extractedDb.copy('${docDir.path}/data/data.db');
+            await extractedDb.copy('${docDir.path}/data.db');
+          } catch (_) {}
+        }
+
         await Settings.useChunkSync.setValue(true);
       }
 
