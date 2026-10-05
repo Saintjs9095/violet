@@ -211,24 +211,28 @@ class DataBaseDownloadPageState extends State<DataBaseDownloadPage> {
       }
       if (widget.dbType! == 'global' || widget.dbType! == 'korean') {
         final docDir = await getApplicationDocumentsDirectory();
-        final dbDir = (Platform.isIOS || Platform.isMacOS)
-            ? await getDatabasesPath()
-            : '${docDir.path}/data';
+        final extractDir = Directory('${docDir.path}/data');
+        if (!await extractDir.exists()) {
+          await extractDir.create(recursive: true);
+        }
 
-        await Directory(dbDir).create(recursive: true);
-        await Directory('${docDir.path}/data').create(recursive: true);
-
+        // 1. Documents/data 안전한 디렉터리에 압축 해제
         await decompress7Z(
           src: '${dir.path}/db.sql.7z',
-          dest: dbDir,
+          dest: extractDir.path,
         );
         await File('${dir.path}/db.sql.7z').delete();
 
-        final extractedDb = File('$dbDir/data.db');
+        // 2. 풀린 data.db를 각 플랫폼 경로에 복사
+        final extractedDb = File('${extractDir.path}/data.db');
         if (await extractedDb.exists()) {
           try {
-            await extractedDb.copy('${docDir.path}/data/data.db');
             await extractedDb.copy('${docDir.path}/data.db');
+          } catch (_) {}
+          try {
+            final dbDirPath = await getDatabasesPath();
+            await Directory(dbDirPath).create(recursive: true);
+            await extractedDb.copy('$dbDirPath/data.db');
           } catch (_) {}
         }
 
