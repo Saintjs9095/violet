@@ -40,8 +40,9 @@ class DataBaseManager {
           dbPath = Platform.isAndroid
               ? '${(await getApplicationDocumentsDirectory()).path}/data/data.db'
               : Platform.isIOS || Platform.isMacOS
-              ? '${await getDatabasesPath()}/data.db'
-              : join(dirname(Platform.resolvedExecutable), 'data/data.db');
+                  ? '${(await getApplicationDocumentsDirectory()).path}/data.db'
+                  : '${await getDatabasesPath()}/data.db'
+              ; join(dirname(Platform.resolvedExecutable), 'data/data.db');
         }
         _instance = create(dbPath);
         await _instance!.open();
@@ -71,6 +72,31 @@ class DataBaseManager {
   }
 
   Future<void> _openInner() async {
+    // [Fix] data.db 경로 fallback 및 상호 복제 보장
+    if (dbPath != null) {
+      final targetFile = File(dbPath!);
+      final docDir = (await getApplicationDocumentsDirectory()).path;
+
+      // 만약 타깃 파일이 없거나 0바이트인 경우, 가능한 모든 위치의 data.db / data-korean.db를 탐색하여 복구
+      if (!targetFile.existsSync() || targetFile.lengthSync() == 0) {
+        final candidates = [
+          '$docDir/data.db',
+          '$docDir/data-korean.db',
+          '$docDir/data/data.db',
+          '$docDir/data/data-korean.db',
+        ];
+
+        for (final cand in candidates) {
+          final candFile = File(cand);
+          if (candFile.existsSync() && candFile.lengthSync() > 1000) {
+            targetFile.parent.createSync(recursive: true);
+            candFile.copySync(targetFile.path);
+            break;
+          }
+        }
+      }
+    }
+
     if (Platform.isAndroid || Platform.isIOS) {
       db ??= await openDatabase(dbPath!);
     } else {
