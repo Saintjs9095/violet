@@ -122,6 +122,7 @@ class SyncManager {
         }
       }
 
+
       // 2. DB 삽입 및 Published -> DateTime 매핑
       var db = await DataBaseManager.getInstance();
       var dbtxn = db.db!;
