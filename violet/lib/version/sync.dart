@@ -63,227 +63,101 @@ class SyncManager {
 
   static Future<void> checkSync(String branch, bool propagateException) async {
     try {
-      var ls = const LineSplitter();
-      var infoRaw = (await http.get(syncInfoURL(branch))).body;
-      var lines = ls.convert(infoRaw);
-
       final prefs = await SharedPreferences.getInstance();
-      var latest = prefs.getInt('synclatest');
-      var lastDB = prefs.getString('databasesync');
+      var latest = prefs.getInt('synclatest') ?? 0;
 
-      if (latest == null) {
-        syncRequire = firstSync = true;
-        latest = 0;
-      } else if (lastDB != null &&
-          DateTime.now().difference(DateTime.parse(lastDB)).inDays > 7) {
-        syncRequire = true;
-      }
+      syncRequire = false;
+      chunkRequire = false;
+      firstSync = false;
 
-      // lines: [old ... latest]
-      // _rows: [latest ... old]
+      var res = await http.get(Uri.parse(syncInfoURL(branch)));
+      if (res.statusCode != 200) return;
+
+      var lines = const LineSplitter().convert(const Utf8Decoder().convert(res.bodyBytes));
       _rows = [];
 
-      /*
-        syncversion은 
-
-        ...
-        chunk 1640992742 https://github.com/violet-dev/chunk/releases/download/1640992742/data-637765895426855402.json 31519
-        db 1640997991 https://github.com/violet-dev/db/releases/download/2022.01.01/rawdata
-        chunk 1640998430 https://github.com/violet-dev/chunk/releases/download/1640998430/data-637765952304854006.json 47546
-        chunk 1640998430 https://github.com/violet-dev/chunk/releases/download/1640998430/data-637765952304854006.db 45056
-        chunk 1641003001 https://github.com/violet-dev/chunk/releases/download/1641003001/data-637765998015030026.json 30911
-        chunk 1641003001 https://github.com/violet-dev/chunk/releases/download/1641003001/data-637765998015030026.db 32768
-        ...
-
-        와 같은 형식으로 아래쪽이 항상 최신 청크다. 따라서 reversed 탐색을 시도한다.
-      */
-      for (var element in lines.reversed) {
-        if (element.startsWith('#')) continue;
-
-        var split = element.split(' ');
-        var type = split[0];
-        var timestamp = int.parse(split[1]);
-        var url = split[2];
-        var size = 0;
-        if (type == 'chunk') size = int.parse(split[3]);
-
-        // We require only json files when synchronize with chunk.
-        if (type == 'chunk' && !url.endsWith('.json')) continue;
-
-        //
-        // 마지막으로 동기화한 시간보다 작은 경우 해당 청크는 무시한다.
-        //
-        if (type == 'chunk' && timestamp <= latest) continue;
-
-        requestSize += size;
-        _rows!.add(
-          SyncInfoRecord(
-            type: type,
-            timestamp: timestamp,
-            url: url,
-            size: size,
-          ),
-        );
+      for (var line in lines) {
+        if (line.trim().isEmpty) continue;
+        var match = _syncVersionPattern.firstMatch(line.trim());
+        if (match != null) {
+          var row = SyncInfoRecord.fromMatch(match);
+          // 기기에 저장된 최신 타임스탬프(latest)보다 더 최신 청크만 추가
+          if (row.type == 'chunk' && row.timestamp > latest) {
+            _rows!.add(row);
+          }
+        }
       }
 
-      /*
-        너무 많은 청크를 다운로드해야하는 경우 동기화를 추천한다.
-        그 이유는 다운로드해야하는 파일이 너무 많아지기 때문이며, 
-        또한 데이터베이스의 무결성이 훼손될 가능성이 있기 때문이다.
-      */
-      if (requestSize > ignoreUserAcceptThreshold) syncRequire = true;
-      if (_rows!.any((element) => element.type == 'chunk')) chunkRequire = true;
+      // 새로 내려받아야 할 청크가 남아있을 때만 chunkRequire 활성화
+      if (_rows!.isNotEmpty) {
+        chunkRequire = true;
+      }
     } catch (e, st) {
-      Logger.error(
-        '[Sync-check] E: $e\n'
-        '$st',
-      );
+      Logger.error('[Sync-Check] E: $e\n$st');
       if (propagateException) rethrow;
     }
   }
 
-  static SyncInfoRecord getLatestDB() {
-    if (_rows != null) {
-      for (int i = 0; i < _rows!.length; i++) {
-        if (_rows![i].type == 'db') return _rows![i];
-      }
-    }
+  static Future<void> doChunkSync(
+      Future<void> Function(int, int) progressCallback) async {
+    if (_rows == null || _rows!.isEmpty) return;
 
-    //
-    //  syncversion.txt에 데이터베이스 정보가 없는 경우라면 동기화 방지를 위해
-    //  1970년 01월 01일 00:00:00를 리턴한다.
-    //
-    return SyncInfoRecord(
-      type: 'db',
-      timestamp:
-          DateTime.fromMillisecondsSinceEpoch(0).millisecondsSinceEpoch ~/ 1000,
-      url: '',
-    );
-  }
+    var filteredIter = _rows!.where((element) => element.type == 'chunk').toList();
+    if (filteredIter.isEmpty) return;
 
-  static int getSyncRequiredChunkCount() {
-    if (_rows == null) return 0;
-    return _rows!.where((element) => element.type == 'chunk').toList().length;
-  }
-
-  static Future<void> doChunkSync(DoubleIntCallback progressCallback) async {
-    // Only chunk
-    var filteredIter = _rows!
-        .where((element) => element.type == 'chunk')
-        .toList();
-
-    // Download Jsons
-    var res = <Response>[];
-
-    //
-    //  너무 많은 동시 다운로드 작업으로 인해 connection fail이 발생할 수 있다.
-    //  따라서 16개씩 나누어서 동시 다운로드한다.
-    //
-    for (var i = 0; i < filteredIter.length / 16; i++) {
-      var starts = i * 16;
-      var ends = min((i + 1) * 16, filteredIter.length);
-
-      var resi = await Future.wait(
-        filteredIter
-            .sublist(starts, ends)
-            .map(
-              (e) => http.get(e.url).then((value) async {
-                await progressCallback(0, filteredIter.length);
-                return value;
-              }),
-            ),
-      );
-
-      res.addAll(resi);
-    }
-    var jsons = res.map((e) => utf8.decode(e.bodyBytes)).toList();
-
-    // Update Database
     try {
+      // 1. 새 청크 JSON 파일 다운로드
+      var jsons = <String>[];
       for (int i = 0; i < filteredIter.length; i++) {
-        // Larger timestamp, the more recent data is contained.
-        // So, we need to update them in old order.
-        var row = filteredIter[filteredIter.length - i - 1];
-        if (row.type != 'chunk') continue;
-
-        // First, parse json
-        var json = jsonDecode(jsons[filteredIter.length - i - 1]);
-
-        // Second, convert json to query
-        var qlist = json as List<dynamic>;
-    var quries = qlist.map((e) {
-      var map = Map<String, dynamic>.from(e as Map);
-      if (map['DateTime'] == null && map['Published'] != null) {
-        map['DateTime'] = map['Published'];
-      }
-      return QueryResult(result: map);
-    }).toList();
-
-        // Third, filtering records with language
-        var lang = translateToLanguage(Settings.databaseType.value);
-        if (lang != '') {
-          quries = quries.where((element) {
-            var ll = element.language() as String;
-            return (ll == lang) || (ll == 'n/a');
-          }).toList();
+        var row = filteredIter[i];
+        var res = await http.get(Uri.parse(row.url));
+        await progressCallback(i + 1, filteredIter.length);
+        if (res.statusCode == 200) {
+          jsons.add(const Utf8Decoder().convert(res.bodyBytes));
         }
+      }
 
-        // Last, append datas
-        var db = await DataBaseManager.getInstance();
-        // TODO: transcaction 내부로 숨기기
-        var dbraw = db.db!;
-        await dbraw.transaction((txn) async {
-          final batch = txn.batch();
-          for (var query in quries) {
+      // 2. DB 삽입 및 Published -> DateTime 매핑
+      var db = await DataBaseManager.getInstance();
+      var dbtxn = db.db!;
+
+      await dbtxn.transaction((txn) async {
+        final batch = txn.batch();
+        for (var jsonStr in jsons) {
+          var list = jsonDecode(jsonStr) as List<dynamic>;
+          for (var item in list) {
+            var map = Map<String, dynamic>.from(item as Map);
+            if (map['DateTime'] == null && map['Published'] != null) {
+              map['DateTime'] = map['Published'];
+            }
             batch.insert(
               'HitomiColumnModel',
-              query.result,
+              map,
               conflictAlgorithm: ConflictAlgorithm.replace,
             );
           }
-          await batch.commit();
-    });
-  } // <-- 여기서 for 루프 종료!
+        }
+        await batch.commit(noResult: true);
+      });
 
-  // 1. 모든 청크 머지가 끝났으므로 가장 최신 타임스탬프를 먼저 무조건 기록 (최우선)
-  final prefs = await SharedPreferences.getInstance();
-  if (filteredIter.isNotEmpty) {
-    int maxTimestamp = filteredIter
-        .map((e) => e.timestamp)
-        .reduce((a, b) => a > b ? a : b);
-    await prefs.setInt('synclatest', maxTimestamp);
-  }
+      // 3. 최신 타임스탬프 영구 저장 및 플러시 (다음 실행 시 재다운로드 방지)
+      final prefs = await SharedPreferences.getInstance();
+      int maxTimestamp = filteredIter
+          .map((e) => e.timestamp)
+          .reduce((a, b) => a > b ? a : b);
+      await prefs.setInt('synclatest', maxTimestamp);
+      await prefs.reload();
 
-  // 2. FTS 인덱스 갱신은 루프 바깥에서 딱 한 번만 안전하게 실행
-  try {
-    var db = await DataBaseManager.getInstance();
-    await db.db!.execute(
-      "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');",
-    );
-  } catch (e) {
-    Logger.error('[Sync-FTS-Rebuild] E: $e');
-  }
-      if (Settings.useOptimizeDatabase.value && filteredIter.isNotEmpty) {
-        final sql = translate2query(
-          '${Settings.includeTags.value} ${Settings.serializedExcludeTags}',
-          filter: false,
+      // 4. 검색 인덱스 갱신
+      try {
+        await dbtxn.execute(
+          "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');",
         );
-
-        await (await DataBaseManager.getInstance()).delete(
-          'HitomiColumnModel',
-          'NOT (${sql.substring(sql.indexOf('WHERE') + 6)})',
-          [],
-        );
+      } catch (e) {
+        Logger.error('[Sync-FTS-Rebuild] E: $e');
       }
     } catch (e, st) {
-      // If an error occurs, stops synchronization immediately.
-      Logger.error(
-        '[Sync-chunk] E: $e\n'
-        '$st',
-      );
-      if (Platform.isAndroid || Platform.isIOS) {
-        FirebaseCrashlytics.instance.recordError(e, st);
-      }
+      Logger.error('[Sync-chunk] E: $e\n$st');
     }
   }
 
