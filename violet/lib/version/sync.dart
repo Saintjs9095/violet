@@ -211,9 +211,13 @@ class SyncManager {
 
         // Second, convert json to query
         var qlist = json as List<dynamic>;
-        var quries = qlist
-            .map((e) => QueryResult(result: e as Map<String, dynamic>))
-            .toList();
+    var quries = qlist.map((e) {
+      var map = Map<String, dynamic>.from(e as Map);
+      if (map['DateTime'] == null && map['Published'] != null) {
+        map['DateTime'] = map['Published'];
+      }
+      return QueryResult(result: map);
+    }).toList();
 
         // Third, filtering records with language
         var lang = translateToLanguage(Settings.databaseType.value);
