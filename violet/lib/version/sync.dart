@@ -253,11 +253,16 @@ class SyncManager {
       }
       // === [추가할 코드 끝] ===
 
-      final prefs = await SharedPreferences.getInstance();
-        
-        await prefs.setInt('synclatest', row.timestamp);
-      }
+     final prefs = await SharedPreferences.getInstance();
 
+    // 동기화한 청크들 중 가장 최신 타임스탬프로 기록
+    if (filteredIter.isNotEmpty) {
+      int maxTimestamp = filteredIter
+          .map((e) => e.timestamp)
+          .reduce((a, b) => a > b ? a : b);
+      await prefs.setInt('synclatest', maxTimestamp);
+    }
+  }
       if (Settings.useOptimizeDatabase.value && filteredIter.isNotEmpty) {
         final sql = translate2query(
           '${Settings.includeTags.value} ${Settings.serializedExcludeTags}',
