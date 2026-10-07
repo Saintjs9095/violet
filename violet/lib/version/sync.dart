@@ -242,26 +242,26 @@ class SyncManager {
             );
           }
           await batch.commit();
-        });
-// === [추가할 코드 시작: FTS 검색 인덱스 갱신] ===
-      try {
-        await dbraw.execute(
-          "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');"
-        );
-      } catch (e) {
-        Logger.error('[Sync-FTS-Rebuild] E: $e');
-      }
-      // === [추가할 코드 끝] ===
+    });
+  } // <-- 여기서 for 루프 종료!
 
-     final prefs = await SharedPreferences.getInstance();
+  // 1. 모든 청크 머지가 끝났으므로 가장 최신 타임스탬프를 먼저 무조건 기록 (최우선)
+  final prefs = await SharedPreferences.getInstance();
+  if (filteredIter.isNotEmpty) {
+    int maxTimestamp = filteredIter
+        .map((e) => e.timestamp)
+        .reduce((a, b) => a > b ? a : b);
+    await prefs.setInt('synclatest', maxTimestamp);
+  }
 
-    // 동기화한 청크들 중 가장 최신 타임스탬프로 기록
-    if (filteredIter.isNotEmpty) {
-      int maxTimestamp = filteredIter
-          .map((e) => e.timestamp)
-          .reduce((a, b) => a > b ? a : b);
-      await prefs.setInt('synclatest', maxTimestamp);
-    }
+  // 2. FTS 인덱스 갱신은 루프 바깥에서 딱 한 번만 안전하게 실행
+  try {
+    var db = await DataBaseManager.getInstance();
+    await db.db!.execute(
+      "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');",
+    );
+  } catch (e) {
+    Logger.error('[Sync-FTS-Rebuild] E: $e');
   }
       if (Settings.useOptimizeDatabase.value && filteredIter.isNotEmpty) {
         final sql = translate2query(
