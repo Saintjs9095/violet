@@ -81,10 +81,10 @@ class SyncManager {
         var match = _syncVersionPattern.firstMatch(line.trim());
         if (match != null) {
           var row = SyncInfoRecord(
-            match.group(1)!,
-            int.parse(match.group(2)!),
-            match.group(3)!,
-            int.parse(match.group(4)!),
+            type: match.group(1)!,
+            timestamp: int.parse(match.group(2)!),
+            url: match.group(3)!,
+            size: int.parse(match.group(4)!),
           );
           // 기기에 저장된 최신 타임스탬프(latest)보다 더 최신 청크만 추가
           if (row.type == 'chunk' && row.timestamp > latest) {
