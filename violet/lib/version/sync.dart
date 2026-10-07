@@ -70,7 +70,7 @@ class SyncManager {
       chunkRequire = false;
       firstSync = false;
 
-      var res = await http.get(Uri.parse(syncInfoURL(branch)));
+      var res = await http.get(syncInfoURL(branch));
       if (res.statusCode != 200) return;
 
       var lines = const LineSplitter().convert(const Utf8Decoder().convert(res.bodyBytes));
@@ -110,7 +110,7 @@ class SyncManager {
       var jsons = <String>[];
       for (int i = 0; i < filteredIter.length; i++) {
         var row = filteredIter[i];
-        var res = await http.get(Uri.parse(row.url));
+        var res = await http.get(row.url);
         await progressCallback(i + 1, filteredIter.length);
         if (res.statusCode == 200) {
           jsons.add(const Utf8Decoder().convert(res.bodyBytes));
