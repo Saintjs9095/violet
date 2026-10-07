@@ -164,15 +164,30 @@ class _SplashPageState extends State<SplashPage> {
     }
 
     final prefs = await SharedPreferences.getInstance();
-    if (prefs.getInt('db_exists') == 1 && !widget.switching) {
+if (prefs.getInt('db_exists') == 1 && !widget.switching) {
       var connectivityResult = await (Connectivity().checkConnectivity());
-      if (Settings.useChunkSync.value &&
-          !connectivityResult.contains(ConnectivityResult.none)) {
+      if (!connectivityResult.contains(ConnectivityResult.none)) {
         try {
           _changeMessage('check sync...');
           await SyncManager.checkSyncLatest(true);
 
-          if (!SyncManager.firstSync && SyncManager.chunkRequire) {
+          // 1. 서버에 새 DB가 나와서 다운로드가 필요한 경우 (전체 DB 동기화)
+          if (SyncManager.syncRequire) {
+            if (!mounted) return;
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(
+                builder: (context) => DataBaseDownloadPage(
+                  dbType: Settings.databaseType.value,
+                ),
+              ),
+            );
+            return;
+          }
+
+          // 2. 청크 동기화가 설정되어 있고 필요한 경우
+          if (Settings.useChunkSync.value &&
+              !SyncManager.firstSync &&
+              SyncManager.chunkRequire) {
             setState(() {
               showMessage = false;
               showIndicator = true;
@@ -185,18 +200,12 @@ class _SplashPageState extends State<SplashPage> {
             });
           }
         } catch (e, st) {
-          // If an error occurs, stops synchronization immediately.
-          if (Platform.isAndroid || Platform.isIOS) {
-            FirebaseCrashlytics.instance.recordError(e, st);
-          }
-          Logger.error(
-            '[Splash-Navigation] E: $e\n'
-            '$st',
-          );
+          Logger.error('[Splash-Navigation] E: $e\n$st');
         }
       }
 
-      // We must show main page to user anyway
+      // 최신 상태이거나 오프라인일 때 메인 화면으로 진입
+      if (!mounted) return;
       Navigator.of(context).pushReplacementNamed('/AfterLoading');
     } else {
       setState(() {
