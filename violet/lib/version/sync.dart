@@ -43,8 +43,11 @@ class SyncInfoRecord {
 
 class SyncManager {
   static String syncInfoURL(String branch) {
-  return 'http://129.225.133.125/syncversion.txt';
-}
+    return 'http://129.225.133.125/syncversion.txt';
+  }
+
+  static final RegExp _syncVersionPattern =
+      RegExp(r'^([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)');
 
   static bool firstSync = false;
   static bool syncRequire = false; // database sync require
