@@ -155,7 +155,7 @@ class SyncManager {
           .map((e) => e.timestamp)
           .reduce((a, b) => a > b ? a : b);
       await prefs.setInt('synclatest', maxTimestamp);
-      await prefs.reload();
+
 
       // 4. 검색 인덱스 갱신
       try {
