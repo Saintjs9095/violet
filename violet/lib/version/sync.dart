@@ -42,6 +42,21 @@ class SyncInfoRecord {
 }
 
 class SyncManager {
+  static SyncInfoRecord getLatestDB() {
+    if (_rows == null || _rows!.isEmpty) {
+      return SyncInfoRecord(type: 'db', timestamp: 0, url: '', size: 0);
+    }
+    return _rows!.firstWhere(
+      (element) => element.type == 'db',
+      orElse: () => _rows!.first,
+    );
+  }
+
+  static int getSyncRequiredChunkCount() {
+    if (_rows == null) return 0;
+    return _rows!.where((element) => element.type == 'chunk').length;
+  }
+
   static String syncInfoURL(String branch) {
     return 'http://129.225.133.125/syncversion.txt';
   }
