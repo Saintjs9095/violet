@@ -105,16 +105,24 @@ class SyncManager {
             size: int.parse(match.group(4)!),
           );
           // 기기에 저장된 최신 타임스탬프(latest)보다 더 최신 청크만 추가
-          if (row.type == 'chunk' && row.timestamp > latest) {
-            _rows!.add(row);
-          }
+          // DB 행은 무조건 보존하고, 청크는 기기 타임스탬프보다 최신인 것만 추가
+        if (row.type == 'db' || row.type == 'korean' || row.type == 'all') {
+          _rows!.add(row);
+        } else if (row.type == 'chunk' && row.timestamp > latest) {
+          _rows!.add(row);
         }
       }
+    }
 
-      // 새로 내려받아야 할 청크가 남아있을 때만 chunkRequire 활성화
-      if (_rows!.isNotEmpty) {
-        chunkRequire = true;
-      }
+    // 로컬에 DB가 아예 없거나 최초 설치인 경우 전체 DB 다운로드 화면으로 스위칭
+    if (latest == 0) {
+      firstSync = true;
+      syncRequire = true;
+    } else {
+      chunkRequire = _rows!.any((e) => e.type == 'chunk');
+    }
+
+     
     } catch (e, st) {
       Logger.error('[Sync-Check] E: $e\n$st');
       if (propagateException) rethrow;
