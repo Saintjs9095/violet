@@ -141,28 +141,28 @@ class SyncManager {
       }
 
 
-      // 2. DB 삽입 및 Published -> DateTime 매핑
-      var db = await DataBaseManager.getInstance();
-      var dbtxn = db.db!;
+  // 2. DB 삽입 및 Published -> DateTime 매핑 (메모리 폭증 방지를 위해 개별 커밋)
+    var db = await DataBaseManager.getInstance();
+    var dbtxn = db.db!;
 
+    for (var jsonStr in jsons) {
       await dbtxn.transaction((txn) async {
         final batch = txn.batch();
-        for (var jsonStr in jsons) {
-          var list = jsonDecode(jsonStr) as List<dynamic>;
-          for (var item in list) {
-            var map = Map<String, dynamic>.from(item as Map);
-            if (map['DateTime'] == null && map['Published'] != null) {
-              map['DateTime'] = map['Published'];
-            }
-            batch.insert(
-              'HitomiColumnModel',
-              map,
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
+        var list = jsonDecode(jsonStr) as List<dynamic>;
+        for (var item in list) {
+          var map = Map<String, dynamic>.from(item as Map);
+          if (map['DateTime'] == null && map['Published'] != null) {
+            map['DateTime'] = map['Published'];
           }
+          batch.insert(
+            'HitomiColumnModel',
+            map,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
         }
         await batch.commit(noResult: true);
       });
+    }
 
       // 3. 최신 타임스탬프 영구 저장 및 플러시 (다음 실행 시 재다운로드 방지)
       final prefs = await SharedPreferences.getInstance();
