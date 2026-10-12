@@ -153,15 +153,31 @@ class SyncManager {
     var db = await DataBaseManager.getInstance();
     var dbtxn = db.db!;
 
+    const validColumns = {
+      'Id', 'Title', 'EHash', 'Type', 'Artists', 'Characters', 'Groups',
+      'Language', 'Series', 'Tags', 'Uploader', 'Published', 'Files',
+      'Class', 'ExistOnHitomi', 'Thumbnail'
+    };
+
     for (var jsonStr in jsons) {
       await dbtxn.transaction((txn) async {
         final batch = txn.batch();
         var list = jsonDecode(jsonStr) as List<dynamic>;
         for (var item in list) {
-          var map = Map<String, dynamic>.from(item as Map);
-          if (map['DateTime'] == null && map['Published'] != null) {
-            map['DateTime'] = map['Published'];
+          var rawMap = Map<String, dynamic>.from(item as Map);
+          var map = <String, dynamic>{};
+
+          for (var col in validColumns) {
+            if (rawMap.containsKey(col)) {
+              var val = rawMap[col];
+              if (val is List) {
+                map[col] = val.join('|');
+              } else {
+                map[col] = val;
+              }
+            }
           }
+
           batch.insert(
             'HitomiColumnModel',
             map,
