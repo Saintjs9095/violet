@@ -173,7 +173,9 @@ class SyncManager {
 
 
       // 4. 검색 인덱스 갱신
-     
+     } catch (e, st) {
+    Logger.error('[Sync-chunk] E: $e\n$st');
+  }
   }
 
  static String createRawdbPostfix(String lang) {
