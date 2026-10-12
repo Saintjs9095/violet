@@ -172,6 +172,14 @@ class SyncManager {
               var val = rawMap[col];
               if (val is List) {
                 map[col] = val.join('|');
+              } else if (col == 'Published' && val is String) {
+                // ISO8601 -> YYYY-MM-DD HH:MM:SS 정규화
+                try {
+                  var dt = DateTime.parse(val);
+                  map[col] = dt.toIso8601String().replaceAll('T', ' ').split('.').first;
+                } catch (_) {
+                  map[col] = val;
+                }
               } else {
                 map[col] = val;
               }
