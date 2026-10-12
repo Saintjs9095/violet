@@ -173,16 +173,7 @@ class SyncManager {
 
 
       // 4. 검색 인덱스 갱신
-      try {
-        await dbtxn.execute(
-          "INSERT INTO HitomiColumnModelTextSearch(HitomiColumnModelTextSearch) VALUES('rebuild');",
-        );
-      } catch (e) {
-        Logger.error('[Sync-FTS-Rebuild] E: $e');
-      }
-    } catch (e, st) {
-      Logger.error('[Sync-chunk] E: $e\n$st');
-    }
+     
   }
 
  static String createRawdbPostfix(String lang) {
